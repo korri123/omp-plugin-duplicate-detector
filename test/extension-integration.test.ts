@@ -17,12 +17,15 @@ describe("duplicateDetectorExtension integration", () => {
 	});
 
 	it("intercepts write tool_result and injects system reminder with code preview", async () => {
-		// 1. Set up an existing source file in workspace
+		// 1. Set up an existing source file in workspace with sufficient tokens
 		const existingCode = `
-export function validateTransaction(tx: { id: string; amount: number; sender: string }): boolean {
-	if (!tx.id || tx.amount <= 0) return false;
+export function validateTransactionPayload(tx: { id: string; amount: number; sender: string; recipient: string; currency: string }): boolean {
+	if (!tx.id || tx.id.length < 5) return false;
+	if (tx.amount <= 0 || !Number.isFinite(tx.amount)) return false;
 	if (!tx.sender || tx.sender.length < 3) return false;
-	console.log("Validated transaction:", tx.id, tx.amount);
+	if (!tx.recipient || tx.recipient.length < 3) return false;
+	if (tx.currency !== "USD" && tx.currency !== "EUR" && tx.currency !== "GBP") return false;
+	console.log("Validated transaction successfully:", tx.id, tx.amount, tx.currency);
 	return true;
 }
 `;
@@ -124,7 +127,7 @@ export function validateTransaction(tx: { id: string; amount: number; sender: st
 		const textItem = firstItem as ToolTextContent;
 		expect(textItem.text).toContain('<system-reminder reason="code_duplication" file="order-validator.ts">');
 		expect(textItem.text).toContain("transaction-validator.ts");
-		expect(textItem.text).toContain("validateTransaction");
+		expect(textItem.text).toContain("validateTransactionPayload");
 
 		// 6. Test deduplication: subsequent edit with same duplicate should not warn again
 		const secondResult = (await toolResultHandlers[0]!(toolResultEvent, mockCtx)) as ToolResultEventResult | undefined;

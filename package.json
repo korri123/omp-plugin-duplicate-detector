@@ -50,7 +50,12 @@
         "default": true
       },
       "reminderMode": {
-        "type": "string",
+        "type": "enum",
+        "enum": [
+          "in-band",
+          "steer",
+          "none"
+        ],
         "description": "Feedback style: in-band (<system-reminder> on tool_result), steer (follow-up message), or none",
         "default": "in-band"
       },

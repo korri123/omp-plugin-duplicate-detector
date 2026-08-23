@@ -79,18 +79,23 @@ export class IsolatedMemoryStore implements IStore<IMapFrame> {
 }
 
 /**
- * Subclass of MemoryStore that allows extracting the underlying namespace map.
+ * Subclass of MemoryStore that allows extracting the underlying namespace map
+ * and evicting all frames for a given source file.
  */
 class ExportableMemoryStore extends MemoryStore<IMapFrame> {
 	getNamespaceValues(): Record<string, Record<string, IMapFrame>> {
 		return this.values;
 	}
 
-	deleteKeys(keys: Array<{ namespace: string; key: string }>): void {
-		const values = this.values;
-		for (const { namespace, key } of keys) {
-			if (values[namespace]) {
-				delete values[namespace][key];
+	deleteBySourceId(sourceId: string): void {
+		for (const ns of Object.keys(this.values)) {
+			const nsMap = this.values[ns];
+			if (!nsMap) continue;
+			for (const key of Object.keys(nsMap)) {
+				const frame = nsMap[key];
+				if (frame && frame.sourceId === sourceId) {
+					delete nsMap[key];
+				}
 			}
 		}
 	}
@@ -102,10 +107,10 @@ export class JscpdIndexManager {
 	readonly #options: IOptions;
 	#detector: Detector;
 	#indexedFiles = new Set<string>();
-	#fileTokenKeys = new Map<string, Array<{ namespace: string; key: string }>>();
 	#discoveredClones: IClone[] = [];
 	#initialized = false;
 	#initPromise: Promise<number> | null = null;
+	#mutationQueue: Promise<void> = Promise.resolve();
 	#rootDir = "";
 
 	constructor(options: JscpdEngineOptions = {}) {
@@ -137,35 +142,47 @@ export class JscpdIndexManager {
 	}
 
 	/**
+	 * Reset all store contents and index state.
+	 */
+	reset(): void {
+		this.#store.close();
+		this.#indexedFiles.clear();
+		this.#discoveredClones = [];
+		this.#initialized = false;
+		this.#initPromise = null;
+		this.#detector = new Detector(this.#tokenizer, this.#store, [], this.#options);
+	}
+
+	/**
 	 * Scan and index the workspace directory into the token store.
 	 * Coalesces concurrent initialization requests.
 	 */
-	async initialize(rootDir: string, ignorePatterns?: string[]): Promise<number> {
+	async initialize(rootDir: string, ignorePatterns?: string[], signal?: AbortSignal): Promise<number> {
 		if (this.#initPromise) {
 			return this.#initPromise;
 		}
 
-		this.#initPromise = this.#runInitialize(rootDir, ignorePatterns).finally(() => {
+		this.#initPromise = this.#runInitialize(rootDir, ignorePatterns, signal).finally(() => {
 			this.#initPromise = null;
 		});
 
 		return this.#initPromise;
 	}
 
-	async #runInitialize(rootDir: string, ignorePatterns?: string[]): Promise<number> {
+	async #runInitialize(rootDir: string, ignorePatterns?: string[], signal?: AbortSignal): Promise<number> {
 		this.#rootDir = path.resolve(rootDir);
-		this.#indexedFiles.clear();
-		this.#fileTokenKeys.clear();
-		this.#discoveredClones = [];
+		this.reset();
 
 		const gitignorePatterns = await this.#readGitignore(this.#rootDir);
 		const userIgnores = ignorePatterns && ignorePatterns.length > 0 ? ignorePatterns : [];
 		const combinedIgnores = [...new Set([...DEFAULT_IGNORE, ...gitignorePatterns, ...userIgnores])];
 
-		const files = await this.#collectFiles(this.#rootDir, this.#rootDir, combinedIgnores);
+		const files = await this.#collectFiles(this.#rootDir, this.#rootDir, combinedIgnores, signal);
 		const seenCloneIds = new Set<string>();
 
 		for (const filePath of files) {
+			if (signal?.aborted) break;
+
 			const relPath = path.relative(this.#rootDir, filePath);
 			const format = getFormatByFile(filePath, this.#options.formatsExts);
 			if (!format) continue;
@@ -191,7 +208,7 @@ export class JscpdIndexManager {
 			}
 		}
 
-		this.#initialized = true;
+		this.#initialized = !signal?.aborted;
 		return this.#indexedFiles.size;
 	}
 
@@ -226,13 +243,9 @@ export class JscpdIndexManager {
 
 			// 1. Cross-file clone against existing repo file
 			if (isAQuery && !isBQuery) {
-				// Avoid identical self-match if file was already indexed and hasn't changed at those lines
+				// Exclude comparison against the pre-mutation indexed state of the same file
 				if (clone.duplicationB.sourceId === relPath) {
-					const rangeA = clone.duplicationA.range;
-					const rangeB = clone.duplicationB.range;
-					if (rangeA[0] === rangeB[0] && rangeA[1] === rangeB[1]) {
-						return false;
-					}
+					return false;
 				}
 				return true;
 			}
@@ -250,6 +263,7 @@ export class JscpdIndexManager {
 
 	/**
 	 * Update the index when a file is written or edited.
+	 * Serialized through a promise queue to prevent namespace race conditions.
 	 * Evicts stale token frames for the file before re-indexing.
 	 */
 	async updateFile(targetPath: string, content: string): Promise<void> {
@@ -257,23 +271,24 @@ export class JscpdIndexManager {
 			await this.#initPromise;
 		}
 
-		const format = getFormatByFile(targetPath, this.#options.formatsExts);
-		if (!format) return;
+		const mutation = async () => {
+			const format = getFormatByFile(targetPath, this.#options.formatsExts);
+			if (!format) return;
 
-		const relPath = path.isAbsolute(targetPath) && this.#rootDir
-			? path.relative(this.#rootDir, targetPath)
-			: targetPath;
+			const relPath = path.isAbsolute(targetPath) && this.#rootDir
+				? path.relative(this.#rootDir, targetPath)
+				: targetPath;
 
-		// Clear stale frames for this file
-		const oldKeys = this.#fileTokenKeys.get(relPath);
-		if (oldKeys) {
-			this.#store.deleteKeys(oldKeys);
-			this.#fileTokenKeys.delete(relPath);
-		}
+			// Evict old frames for this source file
+			this.#store.deleteBySourceId(relPath);
 
-		// Re-detect and index
-		await this.#detector.detect(relPath, content, format);
-		this.#indexedFiles.add(relPath);
+			// Re-detect and index new frames
+			await this.#detector.detect(relPath, content, format);
+			this.#indexedFiles.add(relPath);
+		};
+
+		this.#mutationQueue = this.#mutationQueue.then(mutation, mutation);
+		return this.#mutationQueue;
 	}
 
 	/**
@@ -323,10 +338,11 @@ export class JscpdIndexManager {
 		}
 	}
 
-	async #collectFiles(dir: string, baseDir: string, ignorePatterns: string[]): Promise<string[]> {
+	async #collectFiles(dir: string, baseDir: string, ignorePatterns: string[], signal?: AbortSignal): Promise<string[]> {
 		const results: string[] = [];
-		let entries: Dirent[];
+		if (signal?.aborted) return results;
 
+		let entries: Dirent[];
 		try {
 			entries = await fs.readdir(dir, { withFileTypes: true });
 		} catch {
@@ -334,6 +350,8 @@ export class JscpdIndexManager {
 		}
 
 		for (const entry of entries) {
+			if (signal?.aborted) break;
+
 			const fullPath = path.join(dir, entry.name);
 			const relPath = path.relative(baseDir, fullPath);
 
@@ -342,7 +360,7 @@ export class JscpdIndexManager {
 			}
 
 			if (entry.isDirectory()) {
-				const subFiles = await this.#collectFiles(fullPath, baseDir, ignorePatterns);
+				const subFiles = await this.#collectFiles(fullPath, baseDir, ignorePatterns, signal);
 				results.push(...subFiles);
 			} else if (entry.isFile()) {
 				const format = getFormatByFile(entry.name, this.#options.formatsExts);

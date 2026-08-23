@@ -1,5 +1,5 @@
 import * as path from "node:path";
-import type { ExtensionAPI, ToolContentItem, ToolResultEventResult } from "@oh-my-pi/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, ToolContentItem, ToolResultEventResult } from "@oh-my-pi/pi-coding-agent";
 import { DuplicateLedger } from "./duplicate-ledger";
 import { JscpdIndexManager } from "./jscpd-engine";
 
@@ -24,6 +24,39 @@ const DEFAULT_CONFIG: DuplicateDetectorConfig = {
 };
 
 /**
+ * Resolves user settings from configuration context with fallback to defaults.
+ */
+export function resolveConfig(rawSettings?: Record<string, unknown>): DuplicateDetectorConfig {
+	if (!rawSettings) return { ...DEFAULT_CONFIG };
+
+	const minLines = typeof rawSettings.minLines === "number" ? Math.max(3, rawSettings.minLines) : DEFAULT_CONFIG.minLines;
+	const minTokens = typeof rawSettings.minTokens === "number" ? Math.max(10, rawSettings.minTokens) : DEFAULT_CONFIG.minTokens;
+	const checkOnMutation = typeof rawSettings.checkOnMutation === "boolean" ? rawSettings.checkOnMutation : DEFAULT_CONFIG.checkOnMutation;
+
+	const reminderMode = rawSettings.reminderMode === "steer" || rawSettings.reminderMode === "none" || rawSettings.reminderMode === "in-band"
+		? rawSettings.reminderMode
+		: DEFAULT_CONFIG.reminderMode;
+
+	let ignorePatterns: string[] = [];
+	if (typeof rawSettings.ignorePatterns === "string") {
+		ignorePatterns = rawSettings.ignorePatterns
+			.split(",")
+			.map((p) => p.trim())
+			.filter((p) => p.length > 0);
+	} else if (Array.isArray(rawSettings.ignorePatterns)) {
+		ignorePatterns = rawSettings.ignorePatterns.map(String);
+	}
+
+	return {
+		minLines,
+		minTokens,
+		checkOnMutation,
+		reminderMode,
+		ignorePatterns,
+	};
+}
+
+/**
  * Main extension factory for oh-my-pi duplicate detector plugin powered by jscpd.
  */
 export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
@@ -31,18 +64,34 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 
 	pi.setLabel("Duplicate Detector");
 
-	const config: DuplicateDetectorConfig = { ...DEFAULT_CONFIG };
+	let config: DuplicateDetectorConfig = { ...DEFAULT_CONFIG };
 
-	const engine = new JscpdIndexManager({
+	let engine = new JscpdIndexManager({
 		minTokens: config.minTokens,
 		minLines: config.minLines,
 	});
 
 	const ledger = new DuplicateLedger();
 
-	// Session lifecycle: reset ledger on branch/switch
-	pi.on("session_switch", async () => {
+	// Session lifecycle: reset on switch and branch
+	pi.on("session_switch", async (_event, ctx) => {
 		ledger.clear();
+		engine.reset();
+
+		if (ctx) {
+			const ctxSettings = (ctx as { settings?: Record<string, unknown> })?.settings;
+			if (ctxSettings) {
+				config = resolveConfig(ctxSettings);
+			}
+		}
+
+		if (ctx?.cwd) {
+			try {
+				await engine.initialize(ctx.cwd, config.ignorePatterns);
+			} catch {
+				// Ignore background errors
+			}
+		}
 	});
 
 	pi.on("session_branch", async () => {
@@ -52,6 +101,16 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 	// Initialize repository index in background on session start
 	pi.on("session_start", async (_event, ctx) => {
 		pi.logger.debug("Duplicate detector initializing workspace index", { cwd: ctx.cwd });
+
+		// Resolve settings if available on context or session
+		const ctxSettings = (ctx as { settings?: Record<string, unknown> })?.settings;
+		config = resolveConfig(ctxSettings);
+
+		engine = new JscpdIndexManager({
+			minTokens: config.minTokens,
+			minLines: config.minLines,
+		});
+
 		try {
 			const count = await engine.initialize(ctx.cwd, config.ignorePatterns);
 			pi.logger.info("Duplicate detector index ready", { filesIndexed: count });
@@ -176,27 +235,47 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 				? (path.isAbsolute(params.path) ? params.path : path.join(ctx.cwd, params.path))
 				: ctx.cwd;
 
-			const scanEngine = new JscpdIndexManager({
-				minLines: params.minLines ?? config.minLines,
-				minTokens: params.minTokens ?? config.minTokens,
-			});
+			const minLines = typeof params.minLines === "number" ? Math.max(3, params.minLines) : config.minLines;
+			const minTokens = typeof params.minTokens === "number" ? Math.max(10, params.minTokens) : config.minTokens;
 
-			await scanEngine.initialize(scanPath, config.ignorePatterns);
-			const report = scanEngine.formatReport(scanEngine.discoveredClones, scanPath);
+			try {
+				const scanEngine = new JscpdIndexManager({
+					minLines,
+					minTokens,
+				});
 
-			return {
-				content: [
-					{
-						type: "text",
-						text: report,
+				await scanEngine.initialize(scanPath, config.ignorePatterns, signal);
+
+				if (signal?.aborted) {
+					return {
+						content: [{ type: "text", text: "Duplicate detection scan cancelled." }],
+						details: null,
+					};
+				}
+
+				const report = scanEngine.formatReport(scanEngine.discoveredClones, scanPath);
+
+				return {
+					content: [
+						{
+							type: "text",
+							text: report,
+						},
+					],
+					details: {
+						clones: scanEngine.discoveredClones,
+						filesIndexed: scanEngine.indexedCount,
+						scanPath,
 					},
-				],
-				details: {
-					clones: scanEngine.discoveredClones,
-					filesIndexed: scanEngine.indexedCount,
-					scanPath,
-				},
-			};
+				};
+			} catch (err) {
+				const message = err instanceof Error ? err.message : String(err);
+				return {
+					content: [{ type: "text", text: `Duplicate detection failed: ${message}` }],
+					details: null,
+					isError: true,
+				};
+			}
 		},
 	});
 
@@ -220,10 +299,10 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 			for (const part of parts) {
 				if (part.startsWith("--min-lines=")) {
 					const val = Number.parseInt(part.slice("--min-lines=".length), 10);
-					if (!Number.isNaN(val)) minLines = val;
+					if (!Number.isNaN(val)) minLines = Math.max(3, val);
 				} else if (part.startsWith("--min-tokens=")) {
 					const val = Number.parseInt(part.slice("--min-tokens=".length), 10);
-					if (!Number.isNaN(val)) minTokens = val;
+					if (!Number.isNaN(val)) minTokens = Math.max(10, val);
 				} else if (part.startsWith("--path=")) {
 					targetPath = path.resolve(ctx.cwd, part.slice("--path=".length));
 				} else if (!part.startsWith("-")) {
