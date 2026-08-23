@@ -16,6 +16,8 @@ import {
 	computeWorkspaceCacheDir,
 	DiskCacheManager,
 	getDefaultCacheDir,
+	packBinaryShard,
+	unpackBinaryShard,
 } from "../src/disk-cache";
 import {
 	type SerializedSourceShard,
@@ -599,6 +601,122 @@ export function formatCurrency(amount: number, currency = "USD"): string {
 					shard.frames[i]!.end.loc?.end.line ?? shard.frames[i]!.end.line,
 				);
 			}
+		});
+
+		it("unpacks legacy DUP2 binary frame shards seamlessly", async () => {
+			const cacheManager = new DiskCacheManager({
+				rootDir: workspaceDir,
+				cacheDir: cacheBaseDir,
+			});
+
+			const relPath = "src/legacy-dup2.ts";
+			const fullPath = path.join(workspaceDir, relPath);
+			const contentHash = "legacy_dup2_hash_12345";
+			const shardKey = computeShardKey(
+				relPath,
+				contentHash,
+				cacheManager.configFingerprint,
+			);
+
+			await fs.mkdir(cacheManager.workspaceCacheDir, { recursive: true });
+			const binPath = path.join(
+				cacheManager.workspaceCacheDir,
+				`${shardKey}.bin`,
+			);
+
+			const legacyShard: SerializedSourceShard = {
+				version: 1,
+				sourceId: fullPath,
+				contentHash,
+				format: "typescript",
+				size: 100,
+				lines: 10,
+				tokenCount: 50,
+				frames: [
+					{
+						id: "hash_001_legacy_frame",
+						sourceId: fullPath,
+						start: {
+							line: 1,
+							column: 1,
+							position: 0,
+							range: [0, 5],
+							type: "keyword",
+							value: "const",
+							length: 5,
+							format: "typescript",
+						},
+						end: {
+							line: 5,
+							column: 10,
+							position: 80,
+							range: [80, 90],
+							type: "default",
+							value: "value",
+							length: 5,
+							format: "typescript",
+						},
+					},
+				],
+			};
+
+			// Save using packBinaryShard without tokens (forces DUP2 packing)
+			const binaryPayload = packBinaryShard(legacyShard);
+			await fs.writeFile(binPath, binaryPayload);
+
+			const retrieved = await cacheManager.getShard(relPath, contentHash);
+			expect(retrieved).not.toBeNull();
+			expect(retrieved?.sourceId).toBe(fullPath);
+			expect(retrieved?.contentHash).toBe(contentHash);
+			const frames = retrieved?.frames ?? [];
+			expect(frames.length).toBe(1);
+			expect(frames[0]?.id).toBe("hash_001_legacy_frame");
+		});
+
+		it("demonstrates significant size reduction for DUP3 token format vs DUP2 frame format", () => {
+			const index = new SourceAwareCloneIndex({ minTokens: 10, minLines: 3 });
+			const filePath = "src/size-test.ts";
+			const contentHash = "size_test_hash";
+
+			index.addSource(filePath, sampleCodeA);
+			const shard = index.exportSourceShard(filePath, contentHash)!;
+
+			// Pack with tokens (DUP3)
+			const dup3Packed = packBinaryShard(shard);
+
+			// Pack without tokens (DUP2 frame-based)
+			const legacyShard: SerializedSourceShard = {
+				...shard,
+				tokens: undefined,
+				frames: shard.frames,
+			};
+			const dup2Packed = packBinaryShard(legacyShard);
+
+			expect(dup3Packed.length).toBeLessThan(dup2Packed.length);
+		});
+
+		it("cleans up empty workspace directories during prune", async () => {
+			const cacheManager = new DiskCacheManager({
+				rootDir: workspaceDir,
+				cacheDir: cacheBaseDir,
+			});
+
+			const emptySubDir = path.join(cacheBaseDir, "empty_workspace_dir_123");
+			await fs.mkdir(emptySubDir, { recursive: true });
+			expect(
+				await fs
+					.stat(emptySubDir)
+					.then(() => true)
+					.catch(() => false),
+			).toBe(true);
+
+			await cacheManager.prune(100 * 1024 * 1024);
+
+			const exists = await fs
+				.stat(emptySubDir)
+				.then(() => true)
+				.catch(() => false);
+			expect(exists).toBe(false);
 		});
 
 		it("seamlessly loads legacy v1 JSON shards when binary shard is not yet present", async () => {

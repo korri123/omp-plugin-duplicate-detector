@@ -9,11 +9,13 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as zlib from "node:zlib";
-import type {
-	SerializedSourceShard,
-	SourceAwareIndexOptions,
+import {
+	reconstructFramesFromTokens,
+	type SerializedSourceShard,
+	type SerializedToken,
+	type SourceAwareIndexOptions,
+	type SourceFrame,
 } from "./source-aware-index";
-import type { WorkspaceOptions } from "./worker-protocol";
 
 export const DEFAULT_MAX_CACHE_BYTES = 250 * 1024 * 1024; // 250 MB
 
@@ -119,17 +121,122 @@ export function computeShardKey(
 
 /**
  * Encodes a SerializedSourceShard into a high-density, zlib-compressed binary buffer.
+ * Prefers ultra-compact DUP3 token format; falls back to DUP2 frame format.
  */
 export function packBinaryShard(shard: SerializedSourceShard): Buffer {
+	if (shard.tokens && shard.tokens.length > 0) {
+		return packBinaryShardV3(shard, shard.tokens);
+	}
+	if (shard.frames && shard.frames.length > 0) {
+		return packBinaryShardV2(shard, shard.frames);
+	}
+	return packBinaryShardV3(shard, []);
+}
+
+/**
+ * Packs token sequence into ultra-compact DUP3 binary format (10-byte binary hash + coordinates).
+ */
+function packBinaryShardV3(
+	shard: SerializedSourceShard,
+	tokens: SerializedToken[],
+): Buffer {
+	const srcIdBuf = Buffer.from(shard.sourceId, "utf8");
+	const formatBuf = Buffer.from(shard.format, "utf8");
+	const hashBuf = Buffer.from(shard.contentHash, "utf8");
+	const tokenCount = tokens.length;
+	const minTokens = shard.minTokens ?? 40;
+
+	const headerLen =
+		4 + // magic 'DUP3'
+		2 + // version (3)
+		2 +
+		formatBuf.length +
+		2 +
+		hashBuf.length +
+		4 + // size
+		4 + // lines
+		4 + // tokenCount
+		8 + // updatedAt
+		2 + // minTokens
+		2 +
+		srcIdBuf.length +
+		4; // tokenCount in payload
+	const tokenPayloadLen = tokenCount * (10 + 4 + 2 + 4 + 4 + 4); // 28 bytes per token
+	const buf = Buffer.allocUnsafe(headerLen + tokenPayloadLen);
+
+	let pos = 0;
+	buf.write("DUP3", pos, 4, "ascii");
+	pos += 4;
+	buf.writeUInt16LE(3, pos);
+	pos += 2;
+
+	buf.writeUInt16LE(formatBuf.length, pos);
+	pos += 2;
+	formatBuf.copy(buf, pos);
+	pos += formatBuf.length;
+
+	buf.writeUInt16LE(hashBuf.length, pos);
+	pos += 2;
+	hashBuf.copy(buf, pos);
+	pos += hashBuf.length;
+
+	buf.writeUInt32LE(shard.size, pos);
+	pos += 4;
+	buf.writeUInt32LE(shard.lines, pos);
+	pos += 4;
+	buf.writeUInt32LE(shard.tokenCount, pos);
+	pos += 4;
+	buf.writeDoubleLE(shard.updatedAt ?? Date.now(), pos);
+	pos += 8;
+
+	buf.writeUInt16LE(minTokens, pos);
+	pos += 2;
+
+	buf.writeUInt16LE(srcIdBuf.length, pos);
+	pos += 2;
+	srcIdBuf.copy(buf, pos);
+	pos += srcIdBuf.length;
+
+	buf.writeUInt32LE(tokenCount, pos);
+	pos += 4;
+
+	for (let i = 0; i < tokenCount; i++) {
+		const t = tokens[i]!;
+		const hexHash = t.hash.length === 20 ? t.hash : t.hash.padEnd(20, "0");
+		buf.write(hexHash, pos, 10, "hex");
+		pos += 10;
+
+		buf.writeInt32LE(t.line, pos);
+		pos += 4;
+		buf.writeUInt16LE(Math.min(65535, Math.max(0, t.column)), pos);
+		pos += 2;
+		buf.writeInt32LE(t.position, pos);
+		pos += 4;
+		buf.writeInt32LE(t.range[0], pos);
+		pos += 4;
+		buf.writeInt32LE(t.range[1], pos);
+		pos += 4;
+	}
+
+	return zlib.deflateRawSync(buf);
+}
+
+/**
+ * Packs legacy sliding-window frames into DUP2 format.
+ */
+function packBinaryShardV2(
+	shard: SerializedSourceShard,
+	frames: SourceFrame[],
+): Buffer {
 	const srcIdBuf = Buffer.from(shard.sourceId, "utf8");
 	const formatBuf = Buffer.from(shard.format, "utf8");
 	const hashBuf = Buffer.from(shard.contentHash, "utf8");
 
 	let framesPayloadLen = 0;
-	const frameCount = shard.frames ? shard.frames.length : 0;
+	const frameCount = frames.length;
 	const frameIdBufs = new Array<Buffer>(frameCount);
 	for (let i = 0; i < frameCount; i++) {
-		const idBuf = Buffer.from(shard.frames[i]!.id, "utf8");
+		const idBuf = Buffer.from(frames[i]!.id, "utf8");
 		frameIdBufs[i] = idBuf;
 		framesPayloadLen += 1 + idBuf.length + 32; // 1b idLen + idBuf + 8 * 4b coords
 	}
@@ -185,7 +292,7 @@ export function packBinaryShard(shard: SerializedSourceShard): Buffer {
 	pos += 4;
 
 	for (let i = 0; i < frameCount; i++) {
-		const f = shard.frames[i]!;
+		const f = frames[i]!;
 		const idBuf = frameIdBufs[i]!;
 		buf.writeUInt8(idBuf.length, pos);
 		pos += 1;
@@ -215,6 +322,7 @@ export function packBinaryShard(shard: SerializedSourceShard): Buffer {
 
 /**
  * Decodes a zlib-compressed binary buffer into a SerializedSourceShard.
+ * Supports both DUP3 (Token-based) and DUP2 (Frame-based legacy) formats.
  * Returns null if invalid or corrupted.
  */
 export function unpackBinaryShard(
@@ -222,105 +330,199 @@ export function unpackBinaryShard(
 ): SerializedSourceShard | null {
 	try {
 		const buf = zlib.inflateRawSync(compressed);
-		let pos = 0;
 		if (buf.length < 4) return null;
 		const magic = buf.toString("ascii", 0, 4);
-		pos += 4;
-		if (magic !== "DUP2") return null;
-		const version = buf.readUInt16LE(pos);
-		pos += 2;
-		if (version !== 2) return null;
 
-		const formatLen = buf.readUInt16LE(pos);
-		pos += 2;
-		const format = buf.toString("utf8", pos, pos + formatLen);
-		pos += formatLen;
-
-		const hashLen = buf.readUInt16LE(pos);
-		pos += 2;
-		const contentHash = buf.toString("utf8", pos, pos + hashLen);
-		pos += hashLen;
-
-		const size = buf.readUInt32LE(pos);
-		pos += 4;
-		const lines = buf.readUInt32LE(pos);
-		pos += 4;
-		const tokenCount = buf.readUInt32LE(pos);
-		pos += 4;
-		const updatedAt = buf.readDoubleLE(pos);
-		pos += 8;
-
-		const srcLen = buf.readUInt16LE(pos);
-		pos += 2;
-		const sourceId = buf.toString("utf8", pos, pos + srcLen);
-		pos += srcLen;
-
-		const frameCount = buf.readUInt32LE(pos);
-		pos += 4;
-		const frames = new Array(frameCount);
-
-		for (let i = 0; i < frameCount; i++) {
-			const idLen = buf.readUInt8(pos);
-			pos += 1;
-			const id = buf.toString("utf8", pos, pos + idLen);
-			pos += idLen;
-			const startLine = buf.readInt32LE(pos);
-			pos += 4;
-			const startCol = buf.readInt32LE(pos);
-			pos += 4;
-			const startPos = buf.readInt32LE(pos);
-			pos += 4;
-			const startRange0 = buf.readInt32LE(pos);
-			pos += 4;
-			const endLine = buf.readInt32LE(pos);
-			pos += 4;
-			const endCol = buf.readInt32LE(pos);
-			pos += 4;
-			const endPos = buf.readInt32LE(pos);
-			pos += 4;
-			const endRange1 = buf.readInt32LE(pos);
-			pos += 4;
-
-			frames[i] = {
-				id,
-				sourceId,
-				start: {
-					line: startLine,
-					column: startCol,
-					position: startPos,
-					range: [startRange0, startRange0],
-					loc: {
-						start: { line: startLine, column: startCol, position: startPos },
-						end: { line: startLine, column: startCol, position: startPos },
-					},
-				},
-				end: {
-					line: endLine,
-					column: endCol,
-					position: endPos,
-					range: [endRange1, endRange1],
-					loc: {
-						start: { line: endLine, column: endCol, position: endPos },
-						end: { line: endLine, column: endCol, position: endPos },
-					},
-				},
-			};
+		if (magic === "DUP3") {
+			return unpackBinaryShardV3(buf);
 		}
-
-		return {
-			version: 1,
-			sourceId,
-			contentHash,
-			format,
-			size,
-			lines,
-			tokenCount,
-			updatedAt,
-			frames,
-		};
+		if (magic === "DUP2") {
+			return unpackBinaryShardV2(buf);
+		}
+		return null;
 	} catch {
 		return null;
 	}
+}
+
+function unpackBinaryShardV3(buf: Buffer): SerializedSourceShard | null {
+	let pos = 4;
+	const version = buf.readUInt16LE(pos);
+	pos += 2;
+	if (version !== 3) return null;
+
+	const formatLen = buf.readUInt16LE(pos);
+	pos += 2;
+	const format = buf.toString("utf8", pos, pos + formatLen);
+	pos += formatLen;
+
+	const hashLen = buf.readUInt16LE(pos);
+	pos += 2;
+	const contentHash = buf.toString("utf8", pos, pos + hashLen);
+	pos += hashLen;
+
+	const size = buf.readUInt32LE(pos);
+	pos += 4;
+	const lines = buf.readUInt32LE(pos);
+	pos += 4;
+	const tokenCount = buf.readUInt32LE(pos);
+	pos += 4;
+	const updatedAt = buf.readDoubleLE(pos);
+	pos += 8;
+
+	const minTokens = buf.readUInt16LE(pos);
+	pos += 2;
+
+	const srcLen = buf.readUInt16LE(pos);
+	pos += 2;
+	const sourceId = buf.toString("utf8", pos, pos + srcLen);
+	pos += srcLen;
+
+	const tokensPayloadCount = buf.readUInt32LE(pos);
+	pos += 4;
+	const tokens: SerializedToken[] = new Array(tokensPayloadCount);
+	for (let i = 0; i < tokensPayloadCount; i++) {
+		const hash = buf.toString("hex", pos, pos + 10);
+		pos += 10;
+		const line = buf.readInt32LE(pos);
+		pos += 4;
+		const column = buf.readUInt16LE(pos);
+		pos += 2;
+		const position = buf.readInt32LE(pos);
+		pos += 4;
+		const range0 = buf.readInt32LE(pos);
+		pos += 4;
+		const range1 = buf.readInt32LE(pos);
+		pos += 4;
+
+		tokens[i] = {
+			hash,
+			line,
+			column,
+			position,
+			range: [range0, range1],
+		};
+	}
+
+	let memoizedFrames: SourceFrame[] | null = null;
+
+	return {
+		version: 1,
+		sourceId,
+		contentHash,
+		format,
+		size,
+		lines,
+		tokenCount,
+		minTokens,
+		updatedAt,
+		tokens,
+		get frames(): SourceFrame[] {
+			if (!memoizedFrames) {
+				memoizedFrames = reconstructFramesFromTokens(
+					tokens,
+					sourceId,
+					minTokens || 40,
+				);
+			}
+			return memoizedFrames;
+		},
+	};
+}
+
+function unpackBinaryShardV2(buf: Buffer): SerializedSourceShard | null {
+	let pos = 4;
+	const version = buf.readUInt16LE(pos);
+	pos += 2;
+	if (version !== 2) return null;
+
+	const formatLen = buf.readUInt16LE(pos);
+	pos += 2;
+	const format = buf.toString("utf8", pos, pos + formatLen);
+	pos += formatLen;
+
+	const hashLen = buf.readUInt16LE(pos);
+	pos += 2;
+	const contentHash = buf.toString("utf8", pos, pos + hashLen);
+	pos += hashLen;
+
+	const size = buf.readUInt32LE(pos);
+	pos += 4;
+	const lines = buf.readUInt32LE(pos);
+	pos += 4;
+	const tokenCount = buf.readUInt32LE(pos);
+	pos += 4;
+	const updatedAt = buf.readDoubleLE(pos);
+	pos += 8;
+
+	const srcLen = buf.readUInt16LE(pos);
+	pos += 2;
+	const sourceId = buf.toString("utf8", pos, pos + srcLen);
+	pos += srcLen;
+
+	const frameCount = buf.readUInt32LE(pos);
+	pos += 4;
+	const frames = new Array<SourceFrame>(frameCount);
+
+	for (let i = 0; i < frameCount; i++) {
+		const idLen = buf.readUInt8(pos);
+		pos += 1;
+		const id = buf.toString("utf8", pos, pos + idLen);
+		pos += idLen;
+		const startLine = buf.readInt32LE(pos);
+		pos += 4;
+		const startCol = buf.readInt32LE(pos);
+		pos += 4;
+		const startPos = buf.readInt32LE(pos);
+		pos += 4;
+		const startRange0 = buf.readInt32LE(pos);
+		pos += 4;
+		const endLine = buf.readInt32LE(pos);
+		pos += 4;
+		const endCol = buf.readInt32LE(pos);
+		pos += 4;
+		const endPos = buf.readInt32LE(pos);
+		pos += 4;
+		const endRange1 = buf.readInt32LE(pos);
+		pos += 4;
+
+		frames[i] = {
+			id,
+			sourceId,
+			start: {
+				line: startLine,
+				column: startCol,
+				position: startPos,
+				range: [startRange0, startRange0],
+				loc: {
+					start: { line: startLine, column: startCol, position: startPos },
+					end: { line: startLine, column: startCol, position: startPos },
+				},
+			},
+			end: {
+				line: endLine,
+				column: endCol,
+				position: endPos,
+				range: [endRange1, endRange1],
+				loc: {
+					start: { line: endLine, column: endCol, position: endPos },
+					end: { line: endLine, column: endCol, position: endPos },
+				},
+			},
+		};
+	}
+
+	return {
+		version: 1,
+		sourceId,
+		contentHash,
+		format,
+		size,
+		lines,
+		tokenCount,
+		updatedAt,
+		frames,
+	};
 }
 
 /**
@@ -471,8 +673,8 @@ export class DiskCacheManager {
 		try {
 			const entries = await this.#collectCacheFiles(this.baseCacheDir);
 			let totalSize = entries.reduce((acc, e) => acc + e.size, 0);
-
 			if (totalSize <= budget) {
+				await this.#cleanEmptyDirs(this.baseCacheDir);
 				return;
 			}
 
@@ -490,6 +692,8 @@ export class DiskCacheManager {
 					// Ignore individual file deletion errors
 				}
 			}
+
+			await this.#cleanEmptyDirs(this.baseCacheDir);
 		} catch {
 			// Fail open on pruning errors
 		}
@@ -565,5 +769,26 @@ export class DiskCacheManager {
 		}
 
 		return results;
+	}
+
+	/**
+	 * Recursively removes empty directories within the cache tree.
+	 */
+	async #cleanEmptyDirs(dir: string): Promise<void> {
+		try {
+			const dirents = await fs.readdir(dir, { withFileTypes: true });
+			for (const dirent of dirents) {
+				if (dirent.isDirectory()) {
+					const subPath = path.join(dir, dirent.name);
+					await this.#cleanEmptyDirs(subPath);
+				}
+			}
+			const remaining = await fs.readdir(dir);
+			if (remaining.length === 0 && dir !== this.baseCacheDir) {
+				await fs.rmdir(dir).catch(() => {});
+			}
+		} catch {
+			// Ignore
+		}
 	}
 }
