@@ -4,6 +4,9 @@ import {
 	DuplicateNotificationComponent,
 	DuplicateStatusComponent,
 	parseClonesFromText,
+	stripAnsi,
+	toDisplayPath,
+	truncateVisible,
 } from "../src/tui-notification";
 
 describe("TUI Notification Component (TTSR Style)", () => {
@@ -248,6 +251,88 @@ const c = 3;
 		expect(lines[0]).toContain(
 			"[!] Duplicate detector: Ready (2,500 files indexed, capped at 2,500 file limit)",
 		);
+	});
+
+	it("relativizes absolute file paths in rendered cards", () => {
+		const cwd = process.cwd();
+		const comp = new DuplicateNotificationComponent(
+			{
+				filePath: `${cwd}/src/temp-smoke-b.ts`,
+				clones: [
+					{
+						format: "typescript",
+						duplicationA: {
+							sourceId: `${cwd}/src/temp-smoke-b.ts`,
+							start: { line: 1 },
+							end: { line: 28 },
+						},
+						duplicationB: {
+							sourceId: `${cwd}/src/temp-smoke-a.ts`,
+							start: { line: 1 },
+							end: { line: 28 },
+						},
+					},
+				],
+			},
+			false,
+		);
+
+		const rendered = comp.render(80).join("\n");
+		expect(rendered).toContain("src/temp-smoke-b.ts");
+		expect(rendered).toContain("src/temp-smoke-a.ts");
+		expect(rendered).not.toContain(cwd);
+	});
+
+	it("guarantees all rendered boxed lines do not exceed targetWidth even with narrow terminal", () => {
+		const cwd = process.cwd();
+		const comp = new DuplicateNotificationComponent(
+			{
+				filePath: `${cwd}/src/very/long/nested/path/to/some/complex/component/module/file-b.ts`,
+				clones: [
+					{
+						format: "typescript",
+						duplicationA: {
+							sourceId: `${cwd}/src/very/long/nested/path/to/some/complex/component/module/file-b.ts`,
+							start: { line: 100 },
+							end: { line: 250 },
+							fragment:
+								"const extremelyLongVariableNameThatShouldNotBreakTheBoxRenderingInAnyNarrowTerminal = calculateSomethingBig();",
+						},
+						duplicationB: {
+							sourceId: `${cwd}/src/very/long/nested/path/to/some/complex/component/module/file-a.ts`,
+							start: { line: 50 },
+							end: { line: 200 },
+						},
+					},
+				],
+			},
+			true,
+		);
+
+		const width = 60;
+		const rendered = comp.render(width);
+		const expectedTargetWidth = Math.max(30, width - 4);
+
+		// Skip leading spacer
+		for (const line of rendered.slice(1)) {
+			const visibleLen = stripAnsi(line).length;
+			expect(visibleLen).toBe(expectedTargetWidth);
+		}
+	});
+
+	it("toDisplayPath strips virtual: prefix and relativizes paths", () => {
+		expect(toDisplayPath("virtual:src/index.ts")).toBe("src/index.ts");
+		expect(
+			toDisplayPath("/workspace/project/src/foo.ts", "/workspace/project"),
+		).toBe("src/foo.ts");
+	});
+
+	it("truncateVisible correctly truncates strings with ANSI codes without splitting escapes", () => {
+		const styled = "\x1b[1mHello World\x1b[22m";
+		const truncated = truncateVisible(styled, 5);
+		expect(stripAnsi(truncated)).toBe("Hello");
+		expect(truncated).toContain("\x1b[1m");
+		expect(truncated).toContain("\x1b[22m");
 	});
 });
 

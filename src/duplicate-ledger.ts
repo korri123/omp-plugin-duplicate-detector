@@ -1,4 +1,5 @@
 import type { IClone } from "@jscpd/core";
+import { toDisplayPath } from "./tui-notification";
 
 /**
  * Unique identifier for a duplicate match.
@@ -64,22 +65,25 @@ export class DuplicateLedger {
 		clones: IClone[],
 		filePath: string,
 		targetFileContent?: string,
+		basePath?: string,
 	): string {
 		if (clones.length === 0) return "";
 
-		let reminder = `<system-reminder reason="code_duplication" file="${filePath}">\n`;
-		reminder += `Warning: Duplicated code detected in '${filePath}'. Consider refactoring into a shared helper or reusing existing logic.\n\n`;
+		const displayTargetFile = toDisplayPath(filePath, basePath);
+		let reminder = `<system-reminder reason="code_duplication" file="${displayTargetFile}">\n`;
+		reminder += `Warning: Duplicated code detected in '${displayTargetFile}'. Consider refactoring into a shared helper or reusing existing logic.\n\n`;
 
 		for (let i = 0; i < clones.length; i++) {
 			const clone = clones[i]!;
 			const a = clone.duplicationA;
 			const b = clone.duplicationB;
 			const linesCount = a.end.line - a.start.line + 1;
+			const srcA = toDisplayPath(a.sourceId, basePath);
+			const srcB = toDisplayPath(b.sourceId, basePath);
 
 			reminder += `### Duplicate #${i + 1} (${linesCount} lines, format: ${clone.format})\n`;
-			reminder += `- Current change: \`${a.sourceId}:${a.start.line}-${a.end.line}\` (lines ${a.start.line} to ${a.end.line})\n`;
-			reminder += `- Pre-existing copy: \`${b.sourceId}:${b.start.line}-${b.end.line}\` (lines ${b.start.line} to ${b.end.line})\n`;
-
+			reminder += `- Current change: \`${srcA}:${a.start.line}-${a.end.line}\` (lines ${a.start.line} to ${a.end.line})\n`;
+			reminder += `- Pre-existing copy: \`${srcB}:${b.start.line}-${b.end.line}\` (lines ${b.start.line} to ${b.end.line})\n`;
 			const snippet =
 				a.fragment ||
 				(targetFileContent

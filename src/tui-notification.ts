@@ -113,21 +113,75 @@ export function parseClonesFromText(text: string): {
 
 	return { filePath, clones };
 }
+/**
+ * Convert a sourceId (possibly virtual or absolute) to a clean relative display path.
+ */
+export function toDisplayPath(sourceId: string, basePath?: string): string {
+	let clean = (sourceId || "").replace(/^virtual:/, "");
+	clean = clean.replace(/\\/g, "/");
+
+	const root = (
+		basePath ||
+		(typeof process !== "undefined" && process.cwd ? process.cwd() : "")
+	)?.replace(/\\/g, "/");
+
+	if (root && clean.startsWith(root)) {
+		clean = clean.slice(root.length);
+		if (clean.startsWith("/")) clean = clean.slice(1);
+	}
+	return clean || sourceId;
+}
 
 /**
  * Strips ANSI escape sequences for length calculation.
  */
-function stripAnsi(text: string): string {
+export function stripAnsi(text: string): string {
 	return text.replace(/\x1b\[[0-9;]*m/g, "");
 }
 
 /**
- * Pad a line to the target width taking into account existing visual width.
+ * Truncates a string to a visible character width, preserving ANSI sequences and styling.
  */
-function padLine(text: string, width: number): string {
+export function truncateVisible(text: string, maxWidth: number): string {
+	if (maxWidth <= 0) return "";
+	const ansiRegex = /\x1b\[[0-9;]*m/g;
+	let visibleLen = 0;
+	let result = "";
+	let lastIndex = 0;
+	let match: RegExpExecArray | null;
+
+	while ((match = ansiRegex.exec(text)) !== null) {
+		const segment = text.slice(lastIndex, match.index);
+		for (const char of segment) {
+			if (visibleLen >= maxWidth) break;
+			result += char;
+			visibleLen++;
+		}
+		result += match[0];
+		lastIndex = match.index + match[0].length;
+		if (visibleLen >= maxWidth) break;
+	}
+
+	if (visibleLen < maxWidth && lastIndex < text.length) {
+		const remaining = text.slice(lastIndex);
+		for (const char of remaining) {
+			if (visibleLen >= maxWidth) break;
+			result += char;
+			visibleLen++;
+		}
+	}
+
+	return result;
+}
+
+/**
+ * Pad or truncate a line to the exact target width taking visual width and ANSI sequences into account.
+ */
+export function padLine(text: string, width: number): string {
 	const visibleLen = stripAnsi(text).length;
-	if (visibleLen >= width) return text;
-	return text + " ".repeat(width - visibleLen);
+	if (visibleLen === width) return text;
+	if (visibleLen < width) return text + " ".repeat(width - visibleLen);
+	return truncateVisible(text, width);
 }
 /**
  * TUI Component that renders duplicate detection notifications in TTSR style.
@@ -185,6 +239,7 @@ export class DuplicateNotificationComponent {
 			typeof width === "number" && !Number.isNaN(width)
 				? Math.max(30, width - 4)
 				: 76;
+		const maxInnerWidth = Math.max(20, targetWidth - 2);
 		const theme = this.#theme;
 		const lines: string[] = [];
 
@@ -193,14 +248,16 @@ export class DuplicateNotificationComponent {
 		const warnPrefix = warnIcon ? `${warnIcon} ` : "";
 		const rewindSuffix = rewindIcon ? `  ${rewindIcon}` : "";
 
-		let filePath = this.#data.filePath || "";
+		let rawFilePath = this.#data.filePath || "";
 		let clones = this.#data.clones || [];
 
-		if ((!filePath || clones.length === 0) && this.#data.content) {
+		if ((!rawFilePath || clones.length === 0) && this.#data.content) {
 			const parsed = parseClonesFromText(this.#data.content);
-			if (!filePath) filePath = parsed.filePath;
+			if (!rawFilePath) rawFilePath = parsed.filePath;
 			if (clones.length === 0) clones = parsed.clones;
 		}
+
+		const filePath = toDisplayPath(rawFilePath);
 
 		// Header
 		let header: string;
@@ -232,11 +289,17 @@ export class DuplicateNotificationComponent {
 			const a = clone.duplicationA;
 			const b = clone.duplicationB;
 			const linesCount = a.end.line - a.start.line + 1;
-			const srcA = a.sourceId.replace(/^virtual:/, "");
-			const srcB = b.sourceId.replace(/^virtual:/, "");
-			const location = `• ${srcA}:${a.start.line}-${a.end.line} ↔ ${srcB}:${b.start.line}-${b.end.line} (${linesCount} lines)`;
-			lines.push(location);
-
+			const srcA = toDisplayPath(a.sourceId);
+			const srcB = toDisplayPath(b.sourceId);
+			const singleLoc = `• ${srcA}:${a.start.line}-${a.end.line} ↔ ${srcB}:${b.start.line}-${b.end.line} (${linesCount} lines)`;
+			if (stripAnsi(singleLoc).length <= maxInnerWidth) {
+				lines.push(singleLoc);
+			} else {
+				lines.push(`• ${srcA}:${a.start.line}-${a.end.line}`);
+				lines.push(
+					`  ↔ ${srcB}:${b.start.line}-${b.end.line} (${linesCount} lines)`,
+				);
+			}
 			const snippet = a.fragment?.trim();
 			if (snippet) {
 				const snippetLines = snippet.split(/\r?\n/);
@@ -264,11 +327,17 @@ export class DuplicateNotificationComponent {
 				const a = clone.duplicationA;
 				const b = clone.duplicationB;
 				const linesCount = a.end.line - a.start.line + 1;
-				const srcA = a.sourceId.replace(/^virtual:/, "");
-				const srcB = b.sourceId.replace(/^virtual:/, "");
+				const srcA = toDisplayPath(a.sourceId);
+				const srcB = toDisplayPath(b.sourceId);
 				const loc = `• ${srcA}:${a.start.line}-${a.end.line} ↔ ${srcB}:${b.start.line}-${b.end.line} (${linesCount} lines)`;
-				lines.push(loc);
-
+				if (stripAnsi(loc).length <= maxInnerWidth) {
+					lines.push(loc);
+				} else {
+					lines.push(`• ${srcA}:${a.start.line}-${a.end.line}`);
+					lines.push(
+						`  ↔ ${srcB}:${b.start.line}-${b.end.line} (${linesCount} lines)`,
+					);
+				}
 				if (this.#expanded && a.fragment?.trim()) {
 					const snippetLines = a.fragment.trim().split(/\r?\n/);
 					for (const sLine of snippetLines.slice(0, 5)) {

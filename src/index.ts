@@ -492,10 +492,6 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 					},
 					{ deliverAs: "steer" },
 				);
-				lastCtx?.ui?.notify?.(
-					`⚠️ Duplicate detected: ${targetRel} (${freshClones.length} duplicate${freshClones.length === 1 ? "" : "s"})`,
-					"warning",
-				);
 			}
 		}
 	});
@@ -640,10 +636,6 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 						file: normalizedRelPath,
 						count: freshClones.length,
 					});
-					ctx?.ui?.notify?.(
-						`⚠️ Duplicate detected: ${normalizedRelPath} (${freshClones.length} duplicate${freshClones.length === 1 ? "" : "s"})`,
-						"warning",
-					);
 
 					if (config.reminderMode === "steer") {
 						pi.sendMessage(
