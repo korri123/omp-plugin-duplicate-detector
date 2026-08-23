@@ -76,6 +76,16 @@ function computeConfigHash(
 		formatsExts: config.formatsExts,
 	});
 }
+export function resolveDefaultWorkerUrl(): string {
+	try {
+		if (import.meta.url.endsWith(".ts")) {
+			return new URL("./detector-worker.ts", import.meta.url).href;
+		}
+		return new URL("./detector-worker.js", import.meta.url).href;
+	} catch {
+		return new URL("../dist/detector-worker.js", import.meta.url).href;
+	}
+}
 
 /**
  * High-level coordinator managing the background duplicate detector worker thread.
@@ -99,9 +109,7 @@ export class DuplicateDetectorCoordinator extends EventEmitter<CoordinatorEvents
 	#activeConfigHash: string | null = null;
 	constructor(options: CoordinatorOptions = {}) {
 		super();
-		this.#workerUrl =
-			options.workerUrl ??
-			new URL("../dist/detector-worker.js", import.meta.url).href;
+		this.#workerUrl = options.workerUrl ?? resolveDefaultWorkerUrl();
 		this.#requestTimeoutMs = options.requestTimeoutMs ?? 30_000;
 		this.#autoRestart = options.autoRestart ?? true;
 		this.#maxRestartAttempts = options.maxRestartAttempts ?? 5;
