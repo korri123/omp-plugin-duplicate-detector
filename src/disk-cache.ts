@@ -134,7 +134,8 @@ export function packBinaryShard(shard: SerializedSourceShard): Buffer {
 }
 
 /**
- * Packs token sequence into ultra-compact DUP3 binary format (10-byte binary hash + coordinates).
+ * Packs token sequence into ultra-compact DUP3 binary format using dictionary-encoded
+ * token hashes and columnar delta-encoded coordinates.
  */
 function packBinaryShardV3(
 	shard: SerializedSourceShard,
@@ -145,6 +146,24 @@ function packBinaryShardV3(
 	const hashBuf = Buffer.from(shard.contentHash, "utf8");
 	const tokenCount = tokens.length;
 	const minTokens = shard.minTokens ?? 40;
+
+	// Build dictionary of unique 20-character token hashes
+	const dict = new Map<string, number>();
+	const tokenIndices = new Uint16Array(tokenCount);
+	for (let i = 0; i < tokenCount; i++) {
+		const h = tokens[i]!.hash;
+		let idx = dict.get(h);
+		if (idx === undefined) {
+			idx = dict.size;
+			dict.set(h, idx);
+		}
+		tokenIndices[i] = idx;
+	}
+
+	const dictCount = dict.size;
+	const dictPayloadLen = dictCount * 10;
+	// Columnar: dictIdx(2) + deltaLine(2) + col(2) + deltaRange(4) + len(2) = 12 bytes/token
+	const columnsPayloadLen = tokenCount * (2 + 2 + 2 + 4 + 2);
 
 	const headerLen =
 		4 + // magic 'DUP3'
@@ -160,9 +179,12 @@ function packBinaryShardV3(
 		2 + // minTokens
 		2 +
 		srcIdBuf.length +
+		2 + // dictCount
 		4; // tokenCount in payload
-	const tokenPayloadLen = tokenCount * (10 + 4 + 2 + 4 + 4 + 4); // 28 bytes per token
-	const buf = Buffer.allocUnsafe(headerLen + tokenPayloadLen);
+
+	const buf = Buffer.allocUnsafe(
+		headerLen + dictPayloadLen + columnsPayloadLen,
+	);
 
 	let pos = 0;
 	buf.write("DUP3", pos, 4, "ascii");
@@ -197,28 +219,54 @@ function packBinaryShardV3(
 	srcIdBuf.copy(buf, pos);
 	pos += srcIdBuf.length;
 
+	buf.writeUInt16LE(dictCount, pos);
+	pos += 2;
 	buf.writeUInt32LE(tokenCount, pos);
 	pos += 4;
 
-	for (let i = 0; i < tokenCount; i++) {
-		const t = tokens[i]!;
-		const hexHash = t.hash.length === 20 ? t.hash : t.hash.padEnd(20, "0");
+	// Write dictionary table
+	for (const h of dict.keys()) {
+		const hexHash = h.length === 20 ? h : h.padEnd(20, "0");
 		buf.write(hexHash, pos, 10, "hex");
 		pos += 10;
-
-		buf.writeInt32LE(t.line, pos);
-		pos += 4;
-		buf.writeUInt16LE(Math.min(65535, Math.max(0, t.column)), pos);
-		pos += 2;
-		buf.writeInt32LE(t.position, pos);
-		pos += 4;
-		buf.writeInt32LE(t.range[0], pos);
-		pos += 4;
-		buf.writeInt32LE(t.range[1], pos);
-		pos += 4;
 	}
 
-	return zlib.deflateRawSync(buf);
+	// Columnar byte streams:
+	const dictIdxOffset = pos;
+	const deltaLineOffset = dictIdxOffset + tokenCount * 2;
+	const colOffset = deltaLineOffset + tokenCount * 2;
+	const deltaRangeOffset = colOffset + tokenCount * 2;
+	const lenOffset = deltaRangeOffset + tokenCount * 4;
+
+	let prevLine = 1;
+	let prevRangeStart = 0;
+
+	for (let i = 0; i < tokenCount; i++) {
+		const t = tokens[i]!;
+		const curLine = t.line;
+		const curCol = t.column;
+		const curRange0 = t.range[0];
+		const curRange1 = t.range[1];
+		const tokLen = Math.max(0, curRange1 - curRange0);
+
+		buf.writeUInt16LE(tokenIndices[i]!, dictIdxOffset + i * 2);
+		buf.writeUInt16LE(
+			Math.min(65535, Math.max(0, curLine - prevLine)),
+			deltaLineOffset + i * 2,
+		);
+		buf.writeUInt16LE(Math.min(65535, Math.max(0, curCol)), colOffset + i * 2);
+		buf.writeUInt32LE(
+			Math.max(0, curRange0 - prevRangeStart),
+			deltaRangeOffset + i * 4,
+		);
+		buf.writeUInt16LE(Math.min(65535, tokLen), lenOffset + i * 2);
+
+		prevLine = curLine;
+		prevRangeStart = curRange0;
+	}
+
+	pos = lenOffset + tokenCount * 2;
+	return zlib.deflateRawSync(buf.subarray(0, pos));
 }
 
 /**
@@ -378,30 +426,50 @@ function unpackBinaryShardV3(buf: Buffer): SerializedSourceShard | null {
 	const sourceId = buf.toString("utf8", pos, pos + srcLen);
 	pos += srcLen;
 
+	const dictCount = buf.readUInt16LE(pos);
+	pos += 2;
 	const tokensPayloadCount = buf.readUInt32LE(pos);
 	pos += 4;
-	const tokens: SerializedToken[] = new Array(tokensPayloadCount);
-	for (let i = 0; i < tokensPayloadCount; i++) {
-		const hash = buf.toString("hex", pos, pos + 10);
+
+	// Read dictionary table
+	const dict = new Array<string>(dictCount);
+	for (let i = 0; i < dictCount; i++) {
+		dict[i] = buf.toString("hex", pos, pos + 10);
 		pos += 10;
-		const line = buf.readInt32LE(pos);
-		pos += 4;
-		const column = buf.readUInt16LE(pos);
-		pos += 2;
-		const position = buf.readInt32LE(pos);
-		pos += 4;
-		const range0 = buf.readInt32LE(pos);
-		pos += 4;
-		const range1 = buf.readInt32LE(pos);
-		pos += 4;
+	}
+
+	const dictIdxOffset = pos;
+	const deltaLineOffset = dictIdxOffset + tokensPayloadCount * 2;
+	const colOffset = deltaLineOffset + tokensPayloadCount * 2;
+	const deltaRangeOffset = colOffset + tokensPayloadCount * 2;
+	const lenOffset = deltaRangeOffset + tokensPayloadCount * 4;
+
+	const tokens: SerializedToken[] = new Array(tokensPayloadCount);
+	let prevLine = 1;
+	let prevRangeStart = 0;
+
+	for (let i = 0; i < tokensPayloadCount; i++) {
+		const dictIdx = buf.readUInt16LE(dictIdxOffset + i * 2);
+		const hash = dict[dictIdx] || "";
+		const deltaLine = buf.readUInt16LE(deltaLineOffset + i * 2);
+		const col = buf.readUInt16LE(colOffset + i * 2);
+		const deltaRange = buf.readUInt32LE(deltaRangeOffset + i * 4);
+		const tokLen = buf.readUInt16LE(lenOffset + i * 2);
+
+		const line = prevLine + deltaLine;
+		const rangeStart = prevRangeStart + deltaRange;
+		const rangeEnd = rangeStart + tokLen;
 
 		tokens[i] = {
 			hash,
 			line,
-			column,
-			position,
-			range: [range0, range1],
+			column: col,
+			position: i,
+			range: [rangeStart, rangeEnd],
 		};
+
+		prevLine = line;
+		prevRangeStart = rangeStart;
 	}
 
 	let memoizedFrames: SourceFrame[] | null = null;
