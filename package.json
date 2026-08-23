@@ -3,18 +3,20 @@
   "version": "0.1.0",
   "description": "Code clone and duplication detector plugin for oh-my-pi powered by jscpd",
   "type": "module",
-  "main": "./src/index.ts",
+  "main": "./dist/index.js",
   "types": "./src/index.ts",
   "exports": {
     ".": {
-      "import": "./src/index.ts",
+      "import": "./dist/index.js",
       "types": "./src/index.ts"
     }
   },
   "scripts": {
+    "build": "bun build src/index.ts --outfile dist/index.js --target bun",
     "check": "tsc --noEmit",
     "check:types": "tsc --noEmit",
-    "test": "bun test"
+    "test": "bun test",
+    "prepack": "bun run build"
   },
   "keywords": [
     "oh-my-pi",
@@ -31,7 +33,7 @@
     "name": "duplicate-detector",
     "description": "Detect duplicate and clone code blocks across your codebase powered by jscpd",
     "extensions": [
-      "./src/index.ts"
+      "./dist/index.js"
     ],
     "settings": {
       "minLines": {
