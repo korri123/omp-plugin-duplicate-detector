@@ -18,7 +18,7 @@ Built on `jscpd` and powered by **Bun** native primitives, this plugin proactive
 - **High-Density SQLite Disk Cache (DUP3)**: Token shards are dictionary-compressed into columnar binary streams with delta-encoded coordinates and cached in a per-workspace SQLite database using WAL mode. Cold starts load instantly without re-tokenization.
 - **Native Bun.hash Engine**: Employs Bun's native 64-bit hasher (`fastTokenHash`) for token and window hashing, dramatically outperforming JavaScript-based hashing libraries.
 - **Git-Aware Baseline Indexing**: Enters your project via `git ls-files --cached`, automatically ignoring untracked files, lockfiles, minified bundles, vendor directories, and non-code assets.
-- **Autonomous Agent Tool & Skill**: Equips LLMs with the `detect_duplicates` tool and the `detect-duplicates` skill to audit code quality before and during refactors.
+- **Autonomous Agent Tool**: Equips LLMs with the `detect_duplicates` tool to audit code quality before and during refactors.
 - **Interactive Slash Command & TTSR UI**: Run `/duplicates` directly in chat with argument auto-completion, collapsible diff previews, and TTSR-styled terminal notification cards.
 
 ---
@@ -30,7 +30,6 @@ Built on `jscpd` and powered by **Bun** native primitives, this plugin proactive
 - [Usage](#usage)
   - [Interactive Slash Command (`/duplicates`)](#interactive-slash-command-duplicates)
   - [Agent Tool (`detect_duplicates`)](#agent-tool-detect_duplicates)
-  - [Companion Skill (`detect-duplicates`)](#companion-skill-detect-duplicates)
 - [Real-Time Mutation Interception](#real-time-mutation-interception)
   - [Feedback Modes (`steer`, `in-band`, `none`)](#feedback-modes)
   - [Duplicate Ledger & Anti-Spam](#duplicate-ledger--anti-spam)
@@ -220,12 +219,6 @@ res.setHeader("Set-Cookie", serializeCookie("session", sessionToken));
 return res.status(200).json({ success: true });
 ```
 ```
-
----
-
-### Companion Skill (`detect-duplicates`)
-
-The plugin includes an auto-discovered `detect-duplicates` skill (`skills/detect-duplicates/SKILL.md`) that guides agents during architectural reviews, refactoring tasks, or duplicate cleanup audits.
 
 ---
 

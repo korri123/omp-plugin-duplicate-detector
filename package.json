@@ -6,7 +6,6 @@
 	"files": [
 		"src",
 		"dist",
-		"skills",
 		"types",
 		"README.md"
 	],
