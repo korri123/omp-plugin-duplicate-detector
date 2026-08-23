@@ -237,6 +237,41 @@ const c = 3;
 			"Duplicate detector: Ready (42 Git files indexed)",
 		);
 	});
+	it("applies muted gray theme styling and italics to ready status text", () => {
+		const styledCalls: { color: string; text: string }[] = [];
+		const mockTheme = {
+			fg: (color: string, text: string) => {
+				styledCalls.push({ color, text });
+				return `[${color}]${text}[/${color}]`;
+			},
+			bg: (_color: string, text: string) => text,
+			bold: (text: string) => `<b>${text}</b>`,
+			italic: (text: string) => `<i>${text}</i>`,
+			inverse: (text: string) => `<inv>${text}</inv>`,
+			icon: { warning: "[!]" },
+		};
+
+		const statusComp = new DuplicateStatusComponent(
+			{
+				status: "complete",
+				count: 5329,
+				content: "Duplicate detector: Ready (5,329 Git files indexed, cached)",
+			},
+			mockTheme,
+		);
+
+		const lines = statusComp.render(80);
+		expect(lines.length).toBe(1);
+		expect(lines[0]).toBe(
+			"<i>[muted]Duplicate detector: Ready (5,329 Git files indexed, cached)[/muted]</i>",
+		);
+		expect(styledCalls).toEqual([
+			{
+				color: "muted",
+				text: "Duplicate detector: Ready (5,329 Git files indexed, cached)",
+			},
+		]);
+	});
 
 	it("renders DuplicateStatusComponent with warning prefix when capped", () => {
 		const statusComp = new DuplicateStatusComponent({

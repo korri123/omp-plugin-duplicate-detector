@@ -436,7 +436,7 @@ export class DuplicateStatusComponent {
 			: "";
 		const coloredText = isWarning
 			? theme.fg("warning", `${prefix}${text}`)
-			: theme.italic(text);
+			: theme.italic(theme.fg("muted", text));
 
 		return [coloredText];
 	}
