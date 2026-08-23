@@ -14,7 +14,11 @@ export function cloneIdentity(clone: IClone): string {
 /**
  * Extract source code lines between start and end lines (1-indexed).
  */
-export function extractLineRange(content: string, startLine: number, endLine: number): string {
+export function extractLineRange(
+	content: string,
+	startLine: number,
+	endLine: number,
+): string {
 	const lines = content.split(/\r?\n/);
 	const start = Math.max(0, startLine - 1);
 	const end = Math.min(lines.length, endLine);
@@ -56,7 +60,11 @@ export class DuplicateLedger {
 	/**
 	 * Format an in-band <system-reminder> XML block for detected clones.
 	 */
-	formatReminder(clones: IClone[], filePath: string, targetFileContent?: string): string {
+	formatReminder(
+		clones: IClone[],
+		filePath: string,
+		targetFileContent?: string,
+	): string {
 		if (clones.length === 0) return "";
 
 		let reminder = `<system-reminder reason="code_duplication" file="${filePath}">\n`;
@@ -72,7 +80,11 @@ export class DuplicateLedger {
 			reminder += `- Current change: \`${a.sourceId}:${a.start.line}-${a.end.line}\` (lines ${a.start.line} to ${a.end.line})\n`;
 			reminder += `- Pre-existing copy: \`${b.sourceId}:${b.start.line}-${b.end.line}\` (lines ${b.start.line} to ${b.end.line})\n`;
 
-			const snippet = a.fragment || (targetFileContent ? extractLineRange(targetFileContent, a.start.line, a.end.line) : "");
+			const snippet =
+				a.fragment ||
+				(targetFileContent
+					? extractLineRange(targetFileContent, a.start.line, a.end.line)
+					: "");
 			if (snippet.trim()) {
 				reminder += `\n\`\`\`${clone.format}\n${snippet.trim()}\n\`\`\`\n`;
 			}

@@ -114,7 +114,12 @@ ignore: ["dist", "build", "coverage"]
 
 		it("filters null and undefined items from sparse arrays without coercing to string 'null'", () => {
 			const normalized = normalizeJscpdConfig({
-				ignore: ["dist/**", null as unknown as string, undefined as unknown as string, "build/**"],
+				ignore: [
+					"dist/**",
+					null as unknown as string,
+					undefined as unknown as string,
+					"build/**",
+				],
 				formatsExts: {
 					typescript: ["ts", null as unknown as string, "tsx"],
 				},
@@ -229,7 +234,10 @@ minTokens: 85
 		it("loads .config/.jscpd.json in subfolder", async () => {
 			const configDir = path.join(tempDir, ".config");
 			await fs.mkdir(configDir, { recursive: true });
-			await Bun.write(path.join(configDir, ".jscpd.json"), JSON.stringify({ minLines: 11 }));
+			await Bun.write(
+				path.join(configDir, ".jscpd.json"),
+				JSON.stringify({ minLines: 11 }),
+			);
 
 			const config = await findProjectJscpdConfig(tempDir);
 			expect(config).not.toBeNull();
@@ -237,13 +245,19 @@ minTokens: 85
 		});
 
 		it("returns null gracefully if no jscpd configuration exists", async () => {
-			await Bun.write(path.join(tempDir, "package.json"), JSON.stringify({ name: "plain" }));
+			await Bun.write(
+				path.join(tempDir, "package.json"),
+				JSON.stringify({ name: "plain" }),
+			);
 			const config = await findProjectJscpdConfig(tempDir);
 			expect(config).toBeNull();
 		});
 
 		it("tolerates corrupt configuration files gracefully without crashing", async () => {
-			await Bun.write(path.join(tempDir, ".jscpd.json"), "{ invalid JSON content !!!");
+			await Bun.write(
+				path.join(tempDir, ".jscpd.json"),
+				"{ invalid JSON content !!!",
+			);
 			const config = await findProjectJscpdConfig(tempDir);
 			expect(config).toBeNull();
 		});

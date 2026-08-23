@@ -2,8 +2,19 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import type {
+	ExtensionAPI,
+	ExtensionContext,
+	RegisteredCommand,
+	ToolDefinition,
+	ToolResultEventResult,
+} from "@oh-my-pi/pi-coding-agent";
 import duplicateDetectorExtension from "../src/index";
-import type { ExtensionAPI, ExtensionContext, ToolDefinition, RegisteredCommand, ToolResultEventResult, ToolTextContent } from "@oh-my-pi/pi-coding-agent";
+
+interface ToolTextContent {
+	type: "text";
+	text: string;
+}
 
 interface MockHarness {
 	api: ExtensionAPI;
@@ -12,7 +23,10 @@ interface MockHarness {
 	registeredCommands: Record<string, Partial<RegisteredCommand>>;
 	sentMessages: Array<{ msg: unknown; opts: unknown }>;
 	createContext: (cwd: string) => Partial<ExtensionContext>;
-	startSession: (cwd: string, settings?: Record<string, unknown>) => Promise<Partial<ExtensionContext>>;
+	startSession: (
+		cwd: string,
+		settings?: Record<string, unknown>,
+	) => Promise<Partial<ExtensionContext>>;
 }
 
 function createMockHarness(): MockHarness {
@@ -66,21 +80,24 @@ function createMockHarness(): MockHarness {
 		},
 	} as unknown as ExtensionAPI;
 
-	const createContext = (cwd: string): Partial<ExtensionContext> => ({
-		cwd,
-		hasUI: true,
-		ui: {
-			notify: () => {},
-			confirm: async () => true,
-			input: async () => "",
-			select: async () => "",
-			setStatus: () => {},
-			setWorkingMessage: () => {},
-			setTitle: () => {},
-		},
-	});
-
-	const startSession = async (cwd: string, settings?: Record<string, unknown>): Promise<Partial<ExtensionContext>> => {
+	const createContext = (cwd: string): ExtensionContext =>
+		({
+			cwd,
+			hasUI: true,
+			ui: {
+				notify: () => {},
+				confirm: async () => true,
+				input: async () => "",
+				select: async () => "",
+				setStatus: () => {},
+				setWorkingMessage: () => {},
+				setTitle: () => {},
+			},
+		}) as unknown as ExtensionContext;
+	const startSession = async (
+		cwd: string,
+		settings?: Record<string, unknown>,
+	): Promise<Partial<ExtensionContext>> => {
 		const ctx = createContext(cwd);
 		for (const handler of eventHandlers["session_start"] || []) {
 			await handler({ type: "session_start", settings }, ctx);
@@ -120,7 +137,10 @@ export function validateTransactionPayload(tx: { id: string; amount: number; sen
 	return true;
 }
 `;
-		await Bun.write(path.join(tempDir, "transaction-validator.ts"), existingCode);
+		await Bun.write(
+			path.join(tempDir, "transaction-validator.ts"),
+			existingCode,
+		);
 
 		const harness = createMockHarness();
 		duplicateDetectorExtension(harness.api);
@@ -137,11 +157,15 @@ export function validateTransactionPayload(tx: { id: string; amount: number; sen
 			toolName: "write",
 			toolCallId: "call_123",
 			input: { path: "order-validator.ts", content: existingCode },
-			content: [{ type: "text", text: "Successfully wrote order-validator.ts" }],
+			content: [
+				{ type: "text", text: "Successfully wrote order-validator.ts" },
+			],
 			isError: false,
 		};
 
-		const result = (await toolResultHandlers[0]!(toolResultEvent, mockCtx)) as ToolResultEventResult | undefined;
+		const result = (await toolResultHandlers[0]!(toolResultEvent, mockCtx)) as
+			| ToolResultEventResult
+			| undefined;
 		expect(result).toBeUndefined();
 
 		// Check steer message
@@ -153,13 +177,22 @@ export function validateTransactionPayload(tx: { id: string; amount: number; sen
 		expect(sentMsg.customType).toBe("duplicate-detector-warning");
 
 		// Deduplication check
-		const secondResult = (await toolResultHandlers[0]!(toolResultEvent, mockCtx)) as ToolResultEventResult | undefined;
+		const secondResult = (await toolResultHandlers[0]!(
+			toolResultEvent,
+			mockCtx,
+		)) as ToolResultEventResult | undefined;
 		expect(secondResult).toBeUndefined();
 
 		// Detect tool execute
 		expect(harness.registeredTools.length).toBe(1);
 		const detectTool = harness.registeredTools[0]!;
-		const toolOutcome = await detectTool.execute("call_tool_1", {}, undefined, undefined, mockCtx as ExtensionContext);
+		const toolOutcome = await detectTool.execute(
+			"call_tool_1",
+			{},
+			undefined,
+			undefined,
+			mockCtx as ExtensionContext,
+		);
 
 		expect(toolOutcome.content.length).toBe(1);
 		const firstToolItem = toolOutcome.content[0] as ToolTextContent;
@@ -186,7 +219,10 @@ export function computeInvoiceTaxes(items: Array<{ price: number; taxRate: numbe
 
 		const harness = createMockHarness();
 		duplicateDetectorExtension(harness.api);
-		const mockCtx = await harness.startSession(tempDir, { reminderMode: "in-band", minTokens: 20 });
+		const mockCtx = await harness.startSession(tempDir, {
+			reminderMode: "in-band",
+			minTokens: 20,
+		});
 
 		await Bun.write(path.join(tempDir, "receipt-taxes.ts"), existingCode);
 
@@ -199,12 +235,16 @@ export function computeInvoiceTaxes(items: Array<{ price: number; taxRate: numbe
 			content: [{ type: "text", text: "File written successfully" }],
 		};
 
-		const result = (await toolResultHandlers[0]!(toolResultEvent, mockCtx)) as ToolResultEventResult | undefined;
+		const result = (await toolResultHandlers[0]!(toolResultEvent, mockCtx)) as
+			| ToolResultEventResult
+			| undefined;
 		expect(result).toBeDefined();
 		expect(result?.content?.length).toBe(2);
 
 		const textItem = result?.content?.[0] as ToolTextContent;
-		expect(textItem.text).toContain('<system-reminder reason="code_duplication" file="receipt-taxes.ts">');
+		expect(textItem.text).toContain(
+			'<system-reminder reason="code_duplication" file="receipt-taxes.ts">',
+		);
 		expect(textItem.text).toContain("invoice-taxes.ts");
 		expect(textItem.text).toContain("computeInvoiceTaxes");
 		expect(harness.sentMessages.length).toBe(0);
@@ -219,7 +259,10 @@ export function computeInvoiceTaxes(items: Array<{ price: number; taxRate: numbe
 				typescript: ["customts"],
 			},
 		};
-		await Bun.write(path.join(tempDir, ".jscpd.json"), JSON.stringify(jscpdConfig, null, 2));
+		await Bun.write(
+			path.join(tempDir, ".jscpd.json"),
+			JSON.stringify(jscpdConfig, null, 2),
+		);
 
 		const code = `
 export function processCustomOrder(order: { id: string; amount: number; user: string; active: boolean }): boolean {
@@ -270,7 +313,10 @@ export function processCustomOrder(order: { id: string; amount: number; user: st
 			minTokens: 20,
 			ignore: ["ignored-folder/**"],
 		};
-		await Bun.write(path.join(tempDir, ".jscpd.json"), JSON.stringify(jscpdConfig));
+		await Bun.write(
+			path.join(tempDir, ".jscpd.json"),
+			JSON.stringify(jscpdConfig),
+		);
 
 		const code = `
 export function computeMetrics(data: number[]): { sum: number; avg: number } {
@@ -292,14 +338,17 @@ export function computeMetrics(data: number[]): { sum: number; avg: number } {
 		await fs.mkdir(ignoredDir, { recursive: true });
 		await Bun.write(path.join(ignoredDir, "copy.ts"), code);
 
-		await toolResultHandlers[0]!({
-			type: "tool_result",
-			toolName: "write",
-			toolCallId: "call_ignored",
-			input: { path: "ignored-folder/copy.ts", content: code },
-			content: [{ type: "text", text: "ok" }],
-			isError: false,
-		}, mockCtx);
+		await toolResultHandlers[0]!(
+			{
+				type: "tool_result",
+				toolName: "write",
+				toolCallId: "call_ignored",
+				input: { path: "ignored-folder/copy.ts", content: code },
+				content: [{ type: "text", text: "ok" }],
+				isError: false,
+			},
+			mockCtx,
+		);
 
 		expect(harness.sentMessages.length).toBe(0);
 
@@ -307,14 +356,17 @@ export function computeMetrics(data: number[]): { sum: number; avg: number } {
 		const genCode = `// @generated DO NOT EDIT\n${code}`;
 		await Bun.write(path.join(tempDir, "generated-copy.ts"), genCode);
 
-		await toolResultHandlers[0]!({
-			type: "tool_result",
-			toolName: "write",
-			toolCallId: "call_gen",
-			input: { path: "generated-copy.ts", content: genCode },
-			content: [{ type: "text", text: "ok" }],
-			isError: false,
-		}, mockCtx);
+		await toolResultHandlers[0]!(
+			{
+				type: "tool_result",
+				toolName: "write",
+				toolCallId: "call_gen",
+				input: { path: "generated-copy.ts", content: genCode },
+				content: [{ type: "text", text: "ok" }],
+				isError: false,
+			},
+			mockCtx,
+		);
 
 		expect(harness.sentMessages.length).toBe(0);
 	});
@@ -341,10 +393,19 @@ export function simpleHelperFunction(x: number, y: number, z: number): number {
 
 		const harness = createMockHarness();
 		duplicateDetectorExtension(harness.api);
-		const mockCtx = await harness.startSession(tempDir, { minLines: 4, minTokens: 15 });
+		const mockCtx = await harness.startSession(tempDir, {
+			minLines: 4,
+			minTokens: 15,
+		});
 
 		const detectTool = harness.registeredTools[0]!;
-		const outcome = await detectTool.execute("call_subproject", { path: "subproject" }, undefined, undefined, mockCtx as ExtensionContext);
+		const outcome = await detectTool.execute(
+			"call_subproject",
+			{ path: "subproject" },
+			undefined,
+			undefined,
+			mockCtx as ExtensionContext,
+		);
 
 		const textItem = outcome.content[0] as ToolTextContent;
 		expect(textItem.text).toContain("Detected Clones");

@@ -3,7 +3,14 @@ import type { Dirent } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { promisify } from "node:util";
-import { Detector, type IClone, type IMapFrame, type IOptions, type IStore, MemoryStore } from "@jscpd/core";
+import {
+	Detector,
+	type IClone,
+	type IMapFrame,
+	type IOptions,
+	type IStore,
+	MemoryStore,
+} from "@jscpd/core";
 import { getFormatByFile, Tokenizer } from "@jscpd/tokenizer";
 import ignore, { type Ignore } from "ignore";
 import { cloneIdentity } from "./duplicate-ledger";
@@ -74,7 +81,9 @@ export function isGeneratedContent(content: string): boolean {
  * Creates a path ignore predicate matching against default noise patterns
  * and provided user/project ignore patterns.
  */
-export function createIgnoreFilter(userIgnorePatterns: string[] = []): (relPath: string) => boolean {
+export function createIgnoreFilter(
+	userIgnorePatterns: string[] = [],
+): (relPath: string) => boolean {
 	const ig = ignore().add(DEFAULT_NOISE_PATTERNS).add(userIgnorePatterns);
 	return (relPath: string) => {
 		const normalized = relPath.replace(/\\/g, "/").replace(/^\.\//, "");
@@ -168,7 +177,12 @@ export class JscpdIndexManager {
 			maxLines: options.maxLines ?? 500,
 			formatsExts: options.formatsExts,
 		};
-		this.#detector = new Detector(this.#tokenizer, this.#store, [], this.#options);
+		this.#detector = new Detector(
+			this.#tokenizer,
+			this.#store,
+			[],
+			this.#options,
+		);
 	}
 
 	get isInitialized(): boolean {
@@ -196,36 +210,56 @@ export class JscpdIndexManager {
 		this.#discoveredClones = [];
 		this.#initialized = false;
 		this.#initPromise = null;
-		this.#detector = new Detector(this.#tokenizer, this.#store, [], this.#options);
+		this.#detector = new Detector(
+			this.#tokenizer,
+			this.#store,
+			[],
+			this.#options,
+		);
 	}
 
 	/**
 	 * Scan and index the workspace directory into the token store.
 	 * Coalesces concurrent initialization requests.
 	 */
-	async initialize(rootDir: string, ignorePatterns?: string[], signal?: AbortSignal): Promise<number> {
+	async initialize(
+		rootDir: string,
+		ignorePatterns?: string[],
+		signal?: AbortSignal,
+	): Promise<number> {
 		if (this.#initPromise) {
 			return this.#initPromise;
 		}
 
-		this.#initPromise = this.#runInitialize(rootDir, ignorePatterns, signal).finally(() => {
+		this.#initPromise = this.#runInitialize(
+			rootDir,
+			ignorePatterns,
+			signal,
+		).finally(() => {
 			this.#initPromise = null;
 		});
 
 		return this.#initPromise;
 	}
 
-	async #runInitialize(rootDir: string, ignorePatterns?: string[], signal?: AbortSignal): Promise<number> {
+	async #runInitialize(
+		rootDir: string,
+		ignorePatterns?: string[],
+		signal?: AbortSignal,
+	): Promise<number> {
 		this.#rootDir = path.resolve(rootDir);
 		this.reset();
 
-		const userIgnores = ignorePatterns && ignorePatterns.length > 0 ? ignorePatterns : [];
+		const userIgnores =
+			ignorePatterns && ignorePatterns.length > 0 ? ignorePatterns : [];
 		const files = await this.#discoverFiles(this.#rootDir, userIgnores, signal);
 		const seenCloneIds = new Set<string>();
 		for (const filePath of files) {
 			if (signal?.aborted) break;
 
-			const relPath = path.relative(this.#rootDir, filePath).replace(/\\/g, "/");
+			const relPath = path
+				.relative(this.#rootDir, filePath)
+				.replace(/\\/g, "/");
 			const format = getFormatByFile(filePath, this.#options.formatsExts);
 			if (!format) continue;
 
@@ -268,15 +302,24 @@ export class JscpdIndexManager {
 		const format = getFormatByFile(targetPath, this.#options.formatsExts);
 		if (!format) return [];
 
-		const relPath = (path.isAbsolute(targetPath) && this.#rootDir
-			? path.relative(this.#rootDir, targetPath)
-			: targetPath).replace(/\\/g, "/");
+		const relPath = (
+			path.isAbsolute(targetPath) && this.#rootDir
+				? path.relative(this.#rootDir, targetPath)
+				: targetPath
+		).replace(/\\/g, "/");
 
 		const virtualId = `virtual:${relPath}`;
 
 		// Use an isolated overlay store to avoid polluting the persistent MemoryStore with virtual frames
-		const overlayStore = new IsolatedMemoryStore(this.#store.getNamespaceValues());
-		const queryDetector = new Detector(this.#tokenizer, overlayStore, [], this.#options);
+		const overlayStore = new IsolatedMemoryStore(
+			this.#store.getNamespaceValues(),
+		);
+		const queryDetector = new Detector(
+			this.#tokenizer,
+			overlayStore,
+			[],
+			this.#options,
+		);
 
 		const allClones = await queryDetector.detect(virtualId, content, format);
 
@@ -320,9 +363,11 @@ export class JscpdIndexManager {
 			const format = getFormatByFile(targetPath, this.#options.formatsExts);
 			if (!format) return;
 
-			const relPath = (path.isAbsolute(targetPath) && this.#rootDir
-				? path.relative(this.#rootDir, targetPath)
-				: targetPath).replace(/\\/g, "/");
+			const relPath = (
+				path.isAbsolute(targetPath) && this.#rootDir
+					? path.relative(this.#rootDir, targetPath)
+					: targetPath
+			).replace(/\\/g, "/");
 
 			// Evict old frames for this source file
 			this.#store.deleteBySourceId(relPath);
@@ -339,7 +384,10 @@ export class JscpdIndexManager {
 	/**
 	 * Format discovered clones into a Markdown report.
 	 */
-	formatReport(clones: IClone[] = this.#discoveredClones, scanPath = this.#rootDir): string {
+	formatReport(
+		clones: IClone[] = this.#discoveredClones,
+		scanPath = this.#rootDir,
+	): string {
 		let report = `# Duplicate Code Report\n\n`;
 		report += `- **Indexed Files**: ${this.#indexedFiles.size}\n`;
 		report += `- **Scan Target**: \`${scanPath || "."}\`\n`;
@@ -379,7 +427,9 @@ export class JscpdIndexManager {
 		userIgnorePatterns: string[] = [],
 		signal?: AbortSignal,
 	): Promise<string[]> {
-		const baseIgnore = ignore().add(DEFAULT_NOISE_PATTERNS).add(userIgnorePatterns);
+		const baseIgnore = ignore()
+			.add(DEFAULT_NOISE_PATTERNS)
+			.add(userIgnorePatterns);
 
 		// Primary: Git-backed file discovery
 		const gitFiles = await this.#collectFilesViaGit(rootDir, signal);
@@ -406,7 +456,10 @@ export class JscpdIndexManager {
 		return fallbackFiles;
 	}
 
-	async #collectFilesViaGit(rootDir: string, signal?: AbortSignal): Promise<string[] | null> {
+	async #collectFilesViaGit(
+		rootDir: string,
+		signal?: AbortSignal,
+	): Promise<string[] | null> {
 		try {
 			const { stdout } = await execFileAsync(
 				"git",
@@ -449,7 +502,9 @@ export class JscpdIndexManager {
 		}
 
 		let currentIgnore = parentIgnore;
-		const gitignoreEntry = entries.find((e) => e.isFile() && e.name === ".gitignore");
+		const gitignoreEntry = entries.find(
+			(e) => e.isFile() && e.name === ".gitignore",
+		);
 		if (gitignoreEntry) {
 			try {
 				const content = await Bun.file(path.join(dir, ".gitignore")).text();
@@ -471,7 +526,10 @@ export class JscpdIndexManager {
 						if (isRooted || hasMiddleSlash) {
 							scopedLines.push(`${prefix}${relDir}/${clean}`);
 						} else {
-							scopedLines.push(`${prefix}${relDir}/${clean}`, `${prefix}${relDir}/**/${clean}`);
+							scopedLines.push(
+								`${prefix}${relDir}/${clean}`,
+								`${prefix}${relDir}/**/${clean}`,
+							);
 						}
 					} else {
 						scopedLines.push(line);

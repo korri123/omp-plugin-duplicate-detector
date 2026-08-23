@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { JscpdIndexManager, isGeneratedContent } from "../src/jscpd-engine";
+import { isGeneratedContent, JscpdIndexManager } from "../src/jscpd-engine";
 
 describe("JscpdIndexManager", () => {
 	let tempDir: string;
@@ -31,7 +31,10 @@ export function formatUserProfile(user: { id: string; name: string; email: strin
 `;
 
 		const fileA = path.join(tempDir, "user-service.ts");
-		await Bun.write(fileA, `import { db } from "./db";\n${utilCode}\nexport const a = 1;\n`);
+		await Bun.write(
+			fileA,
+			`import { db } from "./db";\n${utilCode}\nexport const a = 1;\n`,
+		);
 
 		const indexedCount = await manager.initialize(tempDir);
 		expect(indexedCount).toBe(1);
@@ -67,7 +70,10 @@ export function computeTotalInvoice(items: Array<{ price: number; qty: number }>
 		const fileB = path.join(tempDir, "checkout.ts");
 
 		await Bun.write(fileA, `// Billing\n${sharedLogic}\nexport const A = 1;\n`);
-		await Bun.write(fileB, `// Checkout\n${sharedLogic}\nexport const B = 2;\n`);
+		await Bun.write(
+			fileB,
+			`// Checkout\n${sharedLogic}\nexport const B = 2;\n`,
+		);
 
 		await manager.initialize(tempDir);
 
@@ -81,7 +87,10 @@ export function computeTotalInvoice(items: Array<{ price: number; qty: number }>
 	});
 
 	it("respects .gitignore patterns when indexing files", async () => {
-		await Bun.write(path.join(tempDir, ".gitignore"), "ignored-dir/\n*.secret.ts\n");
+		await Bun.write(
+			path.join(tempDir, ".gitignore"),
+			"ignored-dir/\n*.secret.ts\n",
+		);
 
 		const ignoredDir = path.join(tempDir, "ignored-dir");
 		await fs.mkdir(ignoredDir, { recursive: true });
@@ -89,7 +98,10 @@ export function computeTotalInvoice(items: Array<{ price: number; qty: number }>
 		const dupCode = `export function duplicateDummyFunction() { const x = 1; const y = 2; return x + y; }\n`;
 		await Bun.write(path.join(ignoredDir, "file1.ts"), dupCode);
 		await Bun.write(path.join(tempDir, "file2.secret.ts"), dupCode);
-		await Bun.write(path.join(tempDir, "normal.ts"), `export const ok = true;\n`);
+		await Bun.write(
+			path.join(tempDir, "normal.ts"),
+			`export const ok = true;\n`,
+		);
 
 		const count = await manager.initialize(tempDir);
 		expect(count).toBe(1);
@@ -112,7 +124,10 @@ export function logEvent(name: string, payload: Record<string, unknown>): void {
 		expect(manager.indexedCount).toBe(1);
 
 		// Another file with same code should now match
-		const clones = await manager.checkSnippet(path.join(tempDir, "analytics.ts"), code);
+		const clones = await manager.checkSnippet(
+			path.join(tempDir, "analytics.ts"),
+			code,
+		);
 		expect(clones.length).toBe(1);
 	});
 
@@ -144,12 +159,18 @@ pub fn calculate_invoice_total(items: &[InvoiceItem], tax_rate: f64, discount: f
 		expect(manager.isInitialized).toBe(true);
 
 		// Python clone detection
-		const pyClones = await manager.checkSnippet(path.join(tempDir, "tax_v2.py"), pyCode);
+		const pyClones = await manager.checkSnippet(
+			path.join(tempDir, "tax_v2.py"),
+			pyCode,
+		);
 		expect(pyClones.length).toBe(1);
 		expect(pyClones[0]!.format).toBe("python");
 
 		// Rust clone detection
-		const rsClones = await manager.checkSnippet(path.join(tempDir, "tax_v2.rs"), rsCode);
+		const rsClones = await manager.checkSnippet(
+			path.join(tempDir, "tax_v2.rs"),
+			rsCode,
+		);
 		expect(rsClones.length).toBe(1);
 		expect(rsClones[0]!.format).toBe("rust");
 	});
@@ -160,7 +181,10 @@ pub fn calculate_invoice_total(items: &[InvoiceItem], tax_rate: f64, discount: f
 
 		await Bun.write(path.join(tempDir, "package-lock.json"), dummyJson);
 		await Bun.write(path.join(tempDir, "bundle.min.js"), minCode);
-		await Bun.write(path.join(tempDir, "main.ts"), `export const app = "ready";\n`);
+		await Bun.write(
+			path.join(tempDir, "main.ts"),
+			`export const app = "ready";\n`,
+		);
 
 		const count = await manager.initialize(tempDir);
 		// Only main.ts should be indexed
@@ -168,12 +192,21 @@ pub fn calculate_invoice_total(items: &[InvoiceItem], tax_rate: f64, discount: f
 	});
 
 	it("supports .gitignore negation patterns", async () => {
-		await Bun.write(path.join(tempDir, ".gitignore"), "generated/*\n!generated/keep.ts\n");
+		await Bun.write(
+			path.join(tempDir, ".gitignore"),
+			"generated/*\n!generated/keep.ts\n",
+		);
 
 		const genDir = path.join(tempDir, "generated");
 		await fs.mkdir(genDir, { recursive: true });
-		await Bun.write(path.join(genDir, "temp.ts"), "export const temp = true;\n");
-		await Bun.write(path.join(genDir, "keep.ts"), "export const keep = true;\n");
+		await Bun.write(
+			path.join(genDir, "temp.ts"),
+			"export const temp = true;\n",
+		);
+		await Bun.write(
+			path.join(genDir, "keep.ts"),
+			"export const keep = true;\n",
+		);
 
 		const count = await manager.initialize(tempDir);
 		expect(count).toBe(1);
@@ -181,7 +214,10 @@ pub fn calculate_invoice_total(items: &[InvoiceItem], tax_rate: f64, discount: f
 
 	it("respects user-provided ignorePatterns option", async () => {
 		await Bun.write(path.join(tempDir, "fileA.ts"), "export const a = 1;\n");
-		await Bun.write(path.join(tempDir, "test.spec.ts"), "export const b = 2;\n");
+		await Bun.write(
+			path.join(tempDir, "test.spec.ts"),
+			"export const b = 2;\n",
+		);
 
 		const count = await manager.initialize(tempDir, ["*.spec.ts"]);
 		expect(count).toBe(1);
@@ -193,7 +229,10 @@ pub fn calculate_invoice_total(items: &[InvoiceItem], tax_rate: f64, discount: f
 		await fs.mkdir(distDir, { recursive: true });
 		await fs.mkdir(srcDir, { recursive: true });
 
-		await Bun.write(path.join(distDir, "bundle.ts"), "export const bundle = 1;\n");
+		await Bun.write(
+			path.join(distDir, "bundle.ts"),
+			"export const bundle = 1;\n",
+		);
 		await Bun.write(path.join(srcDir, "index.ts"), "export const app = 2;\n");
 
 		const count = await manager.initialize(tempDir, ["dist"]);
@@ -211,11 +250,23 @@ pub fn calculate_invoice_total(items: &[InvoiceItem], tax_rate: f64, discount: f
 
 		// Nested .gitignore with rooted rule /build and unrooted rule *.temp.ts
 		await Bun.write(path.join(pkgDir, ".gitignore"), "/build/\n*.temp.ts\n");
-		await Bun.write(path.join(pkgDir, "build", "out.ts"), "export const out = 1;\n");
-		await Bun.write(path.join(pkgDir, "src", "deep", "app.temp.ts"), "export const temp = 1;\n");
+		await Bun.write(
+			path.join(pkgDir, "build", "out.ts"),
+			"export const out = 1;\n",
+		);
+		await Bun.write(
+			path.join(pkgDir, "src", "deep", "app.temp.ts"),
+			"export const temp = 1;\n",
+		);
 		await Bun.write(path.join(pkgDir, "index.ts"), "export const index = 1;\n");
-		await Bun.write(path.join(otherDir, "build", "out.ts"), "export const other = 1;\n");
-		await Bun.write(path.join(otherDir, "src", "deep", "app.temp.ts"), "export const otherTemp = 1;\n");
+		await Bun.write(
+			path.join(otherDir, "build", "out.ts"),
+			"export const other = 1;\n",
+		);
+		await Bun.write(
+			path.join(otherDir, "src", "deep", "app.temp.ts"),
+			"export const otherTemp = 1;\n",
+		);
 
 		const count = await manager.initialize(tempDir);
 		// Ignored: pkgDir/build/out.ts and pkgDir/src/deep/app.temp.ts
@@ -224,16 +275,44 @@ pub fn calculate_invoice_total(items: &[InvoiceItem], tax_rate: f64, discount: f
 	});
 
 	it("correctly identifies generated file comment markers via isGeneratedContent", () => {
-		expect(isGeneratedContent("// Code generated by protoc-gen-go. DO NOT EDIT.\npackage pb\n")).toBe(true);
-		expect(isGeneratedContent("/* @generated SignedSource<<deadbeef>> */\nconst x = 1;\n")).toBe(true);
-		expect(isGeneratedContent("// <auto-generated>\n// This code was generated by a tool.\n// </auto-generated>\n")).toBe(true);
-		expect(isGeneratedContent("<!-- <autogenerated /> -->\n<root></root>\n")).toBe(true);
-		expect(isGeneratedContent("// <autogenerated>\nconst cs = 1;\n")).toBe(true);
-		expect(isGeneratedContent("// This file was automatically generated by ANTLR\nclass Parser {}\n")).toBe(true);
+		expect(
+			isGeneratedContent(
+				"// Code generated by protoc-gen-go. DO NOT EDIT.\npackage pb\n",
+			),
+		).toBe(true);
+		expect(
+			isGeneratedContent(
+				"/* @generated SignedSource<<deadbeef>> */\nconst x = 1;\n",
+			),
+		).toBe(true);
+		expect(
+			isGeneratedContent(
+				"// <auto-generated>\n// This code was generated by a tool.\n// </auto-generated>\n",
+			),
+		).toBe(true);
+		expect(
+			isGeneratedContent("<!-- <autogenerated /> -->\n<root></root>\n"),
+		).toBe(true);
+		expect(isGeneratedContent("// <autogenerated>\nconst cs = 1;\n")).toBe(
+			true,
+		);
+		expect(
+			isGeneratedContent(
+				"// This file was automatically generated by ANTLR\nclass Parser {}\n",
+			),
+		).toBe(true);
 
 		// Normal code containing the word generate or edit in identifier names must NOT be flagged
-		expect(isGeneratedContent("export function generateRandomId(): string {\n  return Math.random().toString(36);\n}\n")).toBe(false);
-		expect(isGeneratedContent("export function editUserProfile(userId: string): void {\n  console.log(userId);\n}\n")).toBe(false);
+		expect(
+			isGeneratedContent(
+				"export function generateRandomId(): string {\n  return Math.random().toString(36);\n}\n",
+			),
+		).toBe(false);
+		expect(
+			isGeneratedContent(
+				"export function editUserProfile(userId: string): void {\n  console.log(userId);\n}\n",
+			),
+		).toBe(false);
 	});
 
 	it("skips indexing files with code-generation markers in repository", async () => {
@@ -259,11 +338,26 @@ export function calculateTax(price: number): number {
 	});
 
 	it("filters out lockfiles from various package managers", async () => {
-		await Bun.write(path.join(tempDir, "Cargo.lock"), "# This file is automatically `@generated` by Cargo.\nversion = 3\n");
-		await Bun.write(path.join(tempDir, "poetry.lock"), "# This file is automatically generated by Poetry.\n");
-		await Bun.write(path.join(tempDir, "composer.lock"), `{"_readme": ["This file locks the dependencies."]}\n`);
-		await Bun.write(path.join(tempDir, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
-		await Bun.write(path.join(tempDir, "index.ts"), "export const ready = true;\n");
+		await Bun.write(
+			path.join(tempDir, "Cargo.lock"),
+			"# This file is automatically `@generated` by Cargo.\nversion = 3\n",
+		);
+		await Bun.write(
+			path.join(tempDir, "poetry.lock"),
+			"# This file is automatically generated by Poetry.\n",
+		);
+		await Bun.write(
+			path.join(tempDir, "composer.lock"),
+			`{"_readme": ["This file locks the dependencies."]}\n`,
+		);
+		await Bun.write(
+			path.join(tempDir, "pnpm-lock.yaml"),
+			"lockfileVersion: '9.0'\n",
+		);
+		await Bun.write(
+			path.join(tempDir, "index.ts"),
+			"export const ready = true;\n",
+		);
 
 		const count = await manager.initialize(tempDir);
 		expect(count).toBe(1);

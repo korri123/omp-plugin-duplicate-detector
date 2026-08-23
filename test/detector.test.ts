@@ -2,9 +2,14 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { JscpdIndexManager } from "../src/jscpd-engine";
+import type {
+	ExtensionAPI,
+	RegisteredCommand,
+	ToolDefinition,
+} from "@oh-my-pi/pi-coding-agent";
 import duplicateDetectorExtension from "../src/index";
-import type { ExtensionAPI, ToolDefinition, RegisteredCommand } from "@oh-my-pi/pi-coding-agent";
+import { JscpdIndexManager } from "../src/jscpd-engine";
+
 describe("duplicate detector", () => {
 	let tempDir: string;
 
@@ -31,8 +36,14 @@ export function calculateMetrics(data: number[]): { sum: number; avg: number } {
 		const fileA = path.join(tempDir, "fileA.ts");
 		const fileB = path.join(tempDir, "fileB.ts");
 
-		await Bun.write(fileA, `// File A header\nimport { foo } from "./foo";\n${sharedCode}\nconsole.log("done A");\n`);
-		await Bun.write(fileB, `// File B header\nimport { bar } from "./bar";\n${sharedCode}\nconsole.log("done B");\n`);
+		await Bun.write(
+			fileA,
+			`// File A header\nimport { foo } from "./foo";\n${sharedCode}\nconsole.log("done A");\n`,
+		);
+		await Bun.write(
+			fileB,
+			`// File B header\nimport { bar } from "./bar";\n${sharedCode}\nconsole.log("done B");\n`,
+		);
 
 		const manager = new JscpdIndexManager({
 			minLines: 5,
@@ -123,8 +134,12 @@ export function calculateMetrics(data: number[]): { sum: number; avg: number } {
 		const tool = registeredTools[0] as ToolDefinition;
 		expect(tool.name).toBe("detect_duplicates");
 		expect(registeredCommands["duplicates"]).toBeDefined();
-		expect(registeredMessageRenderers["duplicate-detector-warning"]).toBeDefined();
-		expect(registeredMessageRenderers["duplicate-detector-report"]).toBeDefined();
+		expect(
+			registeredMessageRenderers["duplicate-detector-warning"],
+		).toBeDefined();
+		expect(
+			registeredMessageRenderers["duplicate-detector-report"],
+		).toBeDefined();
 		expect(eventHandlers["session_start"]).toBeDefined();
 	});
 });

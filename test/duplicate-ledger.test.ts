@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import type { IClone } from "@jscpd/core";
-import { DuplicateLedger, cloneIdentity } from "../src/duplicate-ledger";
+import { cloneIdentity, DuplicateLedger } from "../src/duplicate-ledger";
 
 describe("DuplicateLedger", () => {
 	const mockCloneA: IClone = {
@@ -46,7 +46,9 @@ describe("DuplicateLedger", () => {
 		const ledger = new DuplicateLedger();
 		const reminder = ledger.formatReminder([mockCloneA], "src/auth.ts");
 
-		expect(reminder).toContain('<system-reminder reason="code_duplication" file="src/auth.ts">');
+		expect(reminder).toContain(
+			'<system-reminder reason="code_duplication" file="src/auth.ts">',
+		);
 		expect(reminder).toContain("Warning: Duplicated code detected");
 		expect(reminder).toContain("src/user.ts:5-15");
 		expect(reminder).toContain("function authenticate() { ... }");

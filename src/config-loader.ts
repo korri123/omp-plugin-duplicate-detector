@@ -84,7 +84,8 @@ export function normalizeJscpdConfig(
 	}
 
 	// minTokens / min-tokens / min_tokens / tokens
-	const rawMinTokens = raw.minTokens ?? raw["min-tokens"] ?? raw.min_tokens ?? raw.tokens;
+	const rawMinTokens =
+		raw.minTokens ?? raw["min-tokens"] ?? raw.min_tokens ?? raw.tokens;
 	if (typeof rawMinTokens === "number" && !Number.isNaN(rawMinTokens)) {
 		config.minTokens = Math.max(1, Math.floor(rawMinTokens));
 	} else if (typeof rawMinTokens === "string") {
@@ -102,10 +103,16 @@ export function normalizeJscpdConfig(
 	}
 
 	// ignore / ignorePatterns / ignore-patterns / ignore-pattern
-	const rawIgnore = raw.ignore ?? raw.ignorePatterns ?? raw["ignore-patterns"] ?? raw["ignore-pattern"];
+	const rawIgnore =
+		raw.ignore ??
+		raw.ignorePatterns ??
+		raw["ignore-patterns"] ??
+		raw["ignore-pattern"];
 	if (Array.isArray(rawIgnore)) {
 		config.ignore = rawIgnore
-			.filter((item): item is string | number => item !== null && item !== undefined)
+			.filter(
+				(item): item is string | number => item !== null && item !== undefined,
+			)
 			.map(String)
 			.map((s) => s.trim())
 			.filter((s) => s.length > 0 && s !== "null" && s !== "undefined");
@@ -117,8 +124,13 @@ export function normalizeJscpdConfig(
 	}
 
 	// formatsExts / formats-exts / formats_exts
-	const rawFormatsExts = raw.formatsExts ?? raw["formats-exts"] ?? raw.formats_exts;
-	if (rawFormatsExts && typeof rawFormatsExts === "object" && !Array.isArray(rawFormatsExts)) {
+	const rawFormatsExts =
+		raw.formatsExts ?? raw["formats-exts"] ?? raw.formats_exts;
+	if (
+		rawFormatsExts &&
+		typeof rawFormatsExts === "object" &&
+		!Array.isArray(rawFormatsExts)
+	) {
 		const formatted: Record<string, string[]> = {};
 		for (const [fmt, exts] of Object.entries(rawFormatsExts)) {
 			if (Array.isArray(exts)) {
@@ -143,7 +155,10 @@ export function normalizeJscpdConfig(
 	if (Array.isArray(rawFormat)) {
 		config.format = rawFormat.filter(Boolean).map(String).filter(Boolean);
 	} else if (typeof rawFormat === "string") {
-		config.format = rawFormat.split(",").map((s) => s.trim()).filter(Boolean);
+		config.format = rawFormat
+			.split(",")
+			.map((s) => s.trim())
+			.filter(Boolean);
 	}
 
 	// mode
@@ -152,7 +167,8 @@ export function normalizeJscpdConfig(
 	}
 
 	// crossFormats / cross-formats / cross_formats
-	const rawCross = raw.crossFormats ?? raw["cross-formats"] ?? raw.cross_formats;
+	const rawCross =
+		raw.crossFormats ?? raw["cross-formats"] ?? raw.cross_formats;
 	if (typeof rawCross === "boolean") {
 		config.crossFormats = rawCross;
 	}
@@ -171,9 +187,13 @@ export function normalizeJscpdConfig(
  * Searches candidate config files in standard precedence order.
  * Returns normalized JscpdProjectConfig or null if no config found.
  */
-export async function findProjectJscpdConfig(rootDir: string): Promise<JscpdProjectConfig | null> {
+export async function findProjectJscpdConfig(
+	rootDir: string,
+): Promise<JscpdProjectConfig | null> {
 	for (const candidate of JSCPD_CONFIG_CANDIDATES) {
-		const fullPath = path.isAbsolute(candidate) ? candidate : path.join(rootDir, candidate);
+		const fullPath = path.isAbsolute(candidate)
+			? candidate
+			: path.join(rootDir, candidate);
 
 		try {
 			const file = Bun.file(fullPath);
@@ -184,7 +204,15 @@ export async function findProjectJscpdConfig(rootDir: string): Promise<JscpdProj
 
 			if (basename === "package.json") {
 				const pkg = JSON5.parse(content) as Record<string, unknown>;
-				if (pkg && typeof pkg === "object" && !Array.isArray(pkg) && "jscpd" in pkg && pkg.jscpd && typeof pkg.jscpd === "object" && !Array.isArray(pkg.jscpd)) {
+				if (
+					pkg &&
+					typeof pkg === "object" &&
+					!Array.isArray(pkg) &&
+					"jscpd" in pkg &&
+					pkg.jscpd &&
+					typeof pkg.jscpd === "object" &&
+					!Array.isArray(pkg.jscpd)
+				) {
 					return normalizeJscpdConfig(
 						pkg.jscpd as Record<string, unknown>,
 						fullPath,
@@ -197,7 +225,11 @@ export async function findProjectJscpdConfig(rootDir: string): Promise<JscpdProj
 			if (basename.endsWith(".yaml") || basename.endsWith(".yml")) {
 				const parsed = YAML.parse(content);
 				if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-					return normalizeJscpdConfig(parsed as Record<string, unknown>, fullPath, "file");
+					return normalizeJscpdConfig(
+						parsed as Record<string, unknown>,
+						fullPath,
+						"file",
+					);
 				}
 				continue;
 			}
@@ -206,12 +238,24 @@ export async function findProjectJscpdConfig(rootDir: string): Promise<JscpdProj
 			try {
 				const parsed = JSON5.parse(content);
 				if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-					return normalizeJscpdConfig(parsed as Record<string, unknown>, fullPath, "file");
+					return normalizeJscpdConfig(
+						parsed as Record<string, unknown>,
+						fullPath,
+						"file",
+					);
 				}
 			} catch {
 				const yamlParsed = YAML.parse(content);
-				if (yamlParsed && typeof yamlParsed === "object" && !Array.isArray(yamlParsed)) {
-					return normalizeJscpdConfig(yamlParsed as Record<string, unknown>, fullPath, "file");
+				if (
+					yamlParsed &&
+					typeof yamlParsed === "object" &&
+					!Array.isArray(yamlParsed)
+				) {
+					return normalizeJscpdConfig(
+						yamlParsed as Record<string, unknown>,
+						fullPath,
+						"file",
+					);
 				}
 			}
 		} catch {

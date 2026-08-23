@@ -1,5 +1,8 @@
 import { describe, expect, it } from "bun:test";
-import { DuplicateNotificationComponent, parseClonesFromText } from "../src/tui-notification";
+import {
+	DuplicateNotificationComponent,
+	parseClonesFromText,
+} from "../src/tui-notification";
 
 describe("TUI Notification Component (TTSR Style)", () => {
 	it("parses clones from system reminder text format", () => {
@@ -31,25 +34,29 @@ const c = 3;
 	});
 
 	it("renders single clone in collapsed TTSR style", () => {
-		const comp = new DuplicateNotificationComponent({
-			filePath: "src/sample.ts",
-			clones: [
-				{
-					format: "typescript",
-					duplicationA: {
-						sourceId: "src/sample.ts",
-						start: { line: 1 },
-						end: { line: 20 },
-						fragment: "function test() {\n  console.log('hi');\n  return 42;\n}",
+		const comp = new DuplicateNotificationComponent(
+			{
+				filePath: "src/sample.ts",
+				clones: [
+					{
+						format: "typescript",
+						duplicationA: {
+							sourceId: "src/sample.ts",
+							start: { line: 1 },
+							end: { line: 20 },
+							fragment:
+								"function test() {\n  console.log('hi');\n  return 42;\n}",
+						},
+						duplicationB: {
+							sourceId: "src/original.ts",
+							start: { line: 5 },
+							end: { line: 25 },
+						},
 					},
-					duplicationB: {
-						sourceId: "src/original.ts",
-						start: { line: 5 },
-						end: { line: 25 },
-					},
-				},
-			],
-		}, false);
+				],
+			},
+			false,
+		);
 
 		const rendered = comp.render(80);
 		expect(rendered.length).toBeGreaterThan(3);
@@ -63,25 +70,29 @@ const c = 3;
 	});
 
 	it("renders single clone in expanded TTSR style", () => {
-		const comp = new DuplicateNotificationComponent({
-			filePath: "src/sample.ts",
-			clones: [
-				{
-					format: "typescript",
-					duplicationA: {
-						sourceId: "src/sample.ts",
-						start: { line: 1 },
-						end: { line: 20 },
-						fragment: "function test() {\n  console.log('hi');\n  return 42;\n}",
+		const comp = new DuplicateNotificationComponent(
+			{
+				filePath: "src/sample.ts",
+				clones: [
+					{
+						format: "typescript",
+						duplicationA: {
+							sourceId: "src/sample.ts",
+							start: { line: 1 },
+							end: { line: 20 },
+							fragment:
+								"function test() {\n  console.log('hi');\n  return 42;\n}",
+						},
+						duplicationB: {
+							sourceId: "src/original.ts",
+							start: { line: 5 },
+							end: { line: 25 },
+						},
 					},
-					duplicationB: {
-						sourceId: "src/original.ts",
-						start: { line: 5 },
-						end: { line: 25 },
-					},
-				},
-			],
-		}, true);
+				],
+			},
+			true,
+		);
 
 		const rendered = comp.render(80);
 		const fullText = rendered.join("\n");
@@ -100,7 +111,8 @@ const c = 3;
 							sourceId: "src/tabbed.ts",
 							start: { line: 1 },
 							end: { line: 5 },
-							fragment: "export interface Foo {\n\ttransactionId: string;\n\tamount: number;\n}",
+							fragment:
+								"export interface Foo {\n\ttransactionId: string;\n\tamount: number;\n}",
 						},
 						duplicationB: {
 							sourceId: "src/original.ts",
@@ -122,27 +134,50 @@ const c = 3;
 	});
 
 	it("renders multi-clones properly in bullet format with line ranges", () => {
-		const comp = new DuplicateNotificationComponent({
-			filePath: "src/multi.ts",
-			clones: [
-				{
-					format: "typescript",
-					duplicationA: { sourceId: "virtual:src/multi.ts", start: { line: 1 }, end: { line: 10 } },
-					duplicationB: { sourceId: "src/a.ts", start: { line: 1 }, end: { line: 10 } },
-				},
-				{
-					format: "typescript",
-					duplicationA: { sourceId: "virtual:src/multi.ts", start: { line: 20 }, end: { line: 30 } },
-					duplicationB: { sourceId: "src/b.ts", start: { line: 1 }, end: { line: 10 } },
-				},
-			],
-		}, false);
+		const comp = new DuplicateNotificationComponent(
+			{
+				filePath: "src/multi.ts",
+				clones: [
+					{
+						format: "typescript",
+						duplicationA: {
+							sourceId: "virtual:src/multi.ts",
+							start: { line: 1 },
+							end: { line: 10 },
+						},
+						duplicationB: {
+							sourceId: "src/a.ts",
+							start: { line: 1 },
+							end: { line: 10 },
+						},
+					},
+					{
+						format: "typescript",
+						duplicationA: {
+							sourceId: "virtual:src/multi.ts",
+							start: { line: 20 },
+							end: { line: 30 },
+						},
+						duplicationB: {
+							sourceId: "src/b.ts",
+							start: { line: 1 },
+							end: { line: 10 },
+						},
+					},
+				],
+			},
+			false,
+		);
 
 		const rendered = comp.render(80);
 		const fullText = rendered.join("\n");
 		expect(fullText).toContain("2 duplicate blocks detected");
-		expect(fullText).toContain("• src/multi.ts:1-10 ↔ src/a.ts:1-10 (10 lines)");
-		expect(fullText).toContain("• src/multi.ts:20-30 ↔ src/b.ts:1-10 (11 lines)");
+		expect(fullText).toContain(
+			"• src/multi.ts:1-10 ↔ src/a.ts:1-10 (10 lines)",
+		);
+		expect(fullText).toContain(
+			"• src/multi.ts:20-30 ↔ src/b.ts:1-10 (11 lines)",
+		);
 		expect(fullText).not.toContain("virtual:");
 	});
 
@@ -162,8 +197,16 @@ const c = 3;
 				clones: [
 					{
 						format: "typescript",
-						duplicationA: { sourceId: "src/sample.ts", start: { line: 1 }, end: { line: 5 } },
-						duplicationB: { sourceId: "src/other.ts", start: { line: 10 }, end: { line: 15 } },
+						duplicationA: {
+							sourceId: "src/sample.ts",
+							start: { line: 1 },
+							end: { line: 5 },
+						},
+						duplicationB: {
+							sourceId: "src/other.ts",
+							start: { line: 10 },
+							end: { line: 15 },
+						},
 					},
 				],
 			},

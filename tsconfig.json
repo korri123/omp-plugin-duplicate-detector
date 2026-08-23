@@ -1,40 +1,22 @@
 {
-  "compilerOptions": {
-    "target": "ES2024",
-    "module": "ESNext",
-    "lib": ["ES2024", "DOM.AsyncIterable"],
-    "moduleResolution": "Bundler",
-    "moduleDetection": "force",
-    "strict": true,
-    "noImplicitOverride": true,
-    "noFallthroughCasesInSwitch": true,
-    "skipLibCheck": true,
-    "allowArbitraryExtensions": true,
-    "verbatimModuleSyntax": false,
-    "noEmit": true,
-    "resolveJsonModule": true,
-    "esModuleInterop": true,
-    "forceConsistentCasingInFileNames": true,
-    "types": ["bun", "node"],
-    "typeRoots": ["./types", "./node_modules/@types"],
-    "paths": {
-      "@oh-my-pi/pi-coding-agent": ["./types/extension-api.d.ts"],
-      "@oh-my-pi/pi-coding-agent/*": ["./types/extension-api.d.ts"],
-      "@jscpd/core": ["../jscpd/packages/core/src/index.ts"],
-      "@jscpd/core/*": ["../jscpd/packages/core/src/*"],
-      "@jscpd/tokenizer": ["../jscpd/packages/tokenizer/src/index.ts"],
-      "@jscpd/tokenizer/*": ["../jscpd/packages/tokenizer/src/*"],
-      "@jscpd/finder": ["../jscpd/packages/finder/src/index.ts"],
-      "@jscpd/finder/*": ["../jscpd/packages/finder/src/*"]
-    }
-  },
-  "include": [
-    "src",
-    "test",
-    "types"
-  ],
-  "exclude": [
-    "node_modules",
-    "dist"
-  ]
+	"compilerOptions": {
+		"target": "ESNext",
+		"module": "ESNext",
+		"lib": ["ESNext", "DOM.AsyncIterable"],
+		"moduleResolution": "Bundler",
+		"moduleDetection": "force",
+		"strict": true,
+		"noImplicitOverride": true,
+		"noFallthroughCasesInSwitch": true,
+		"skipLibCheck": true,
+		"allowArbitraryExtensions": true,
+		"verbatimModuleSyntax": false,
+		"noEmit": true,
+		"resolveJsonModule": true,
+		"esModuleInterop": true,
+		"forceConsistentCasingInFileNames": true,
+		"types": ["bun", "node"]
+	},
+	"include": ["src", "test", "types"],
+	"exclude": ["node_modules", "dist"]
 }

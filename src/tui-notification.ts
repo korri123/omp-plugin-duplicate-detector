@@ -49,7 +49,10 @@ const MAX_COLLAPSED_CLONES = 4;
 /**
  * Parse structured clone info from system reminder XML or raw duplicate text if data object is absent.
  */
-export function parseClonesFromText(text: string): { filePath: string; clones: CloneItem[] } {
+export function parseClonesFromText(text: string): {
+	filePath: string;
+	clones: CloneItem[];
+} {
 	let filePath = "";
 	const fileMatch = text.match(/file="([^"]+)"/) || text.match(/in '([^']+)'/);
 	if (fileMatch) {
@@ -58,14 +61,27 @@ export function parseClonesFromText(text: string): { filePath: string; clones: C
 
 	const clones: CloneItem[] = [];
 	const duplicateRegex =
-		/### Duplicate #\d+ \((\d+) lines, format: ([^\)]+)\)[\s\S]*?- Current change: `([^`]+?):(\d+)-(\d+)`[\s\S]*?- Pre-existing copy: `([^`]+?):(\d+)-(\d+)`([\s\S]*?)(?=(?:### Duplicate #|<\/system-reminder>|$))/g;
+		/### Duplicate #\d+ \((\d+) lines, format: ([^)]+)\)[\s\S]*?- Current change: `([^`]+?):(\d+)-(\d+)`[\s\S]*?- Pre-existing copy: `([^`]+?):(\d+)-(\d+)`([\s\S]*?)(?=(?:### Duplicate #|<\/system-reminder>|$))/g;
 	let match: RegExpExecArray | null;
 	while ((match = duplicateRegex.exec(text)) !== null) {
-		const [, _lines, format, fileA, startA, endA, fileB, startB, endB, rawSnippet] = match;
+		const [
+			,
+			_lines,
+			format,
+			fileA,
+			startA,
+			endA,
+			fileB,
+			startB,
+			endB,
+			rawSnippet,
+		] = match;
 		let snippet = "";
 		if (rawSnippet) {
 			const codeBlockMatch = rawSnippet.match(/```[a-z0-9_-]*\n([\s\S]*?)```/i);
-			snippet = codeBlockMatch ? (codeBlockMatch[1] ?? "").trim() : rawSnippet.trim();
+			snippet = codeBlockMatch
+				? (codeBlockMatch[1] ?? "").trim()
+				: rawSnippet.trim();
 		}
 
 		const startLineA = Number.parseInt(startA || "1", 10) || 1;
@@ -115,15 +131,34 @@ export class DuplicateNotificationComponent {
 	#expanded = false;
 	readonly #theme: ThemeLike;
 
-	constructor(data: DuplicateNotificationData, expanded = false, theme?: ThemeLike) {
+	constructor(
+		data: DuplicateNotificationData,
+		expanded = false,
+		theme?: ThemeLike,
+	) {
 		this.#data = data;
 		this.#expanded = expanded;
 		this.#theme = {
-			fg: typeof theme?.fg === "function" ? theme.fg.bind(theme) : (_color, t) => t,
-			bg: typeof theme?.bg === "function" ? theme.bg.bind(theme) : (_color, t) => t,
-			bold: typeof theme?.bold === "function" ? theme.bold.bind(theme) : (t) => `\x1b[1m${t}\x1b[22m`,
-			italic: typeof theme?.italic === "function" ? theme.italic.bind(theme) : (t) => `\x1b[3m${t}\x1b[23m`,
-			inverse: typeof theme?.inverse === "function" ? theme.inverse.bind(theme) : (t) => `\x1b[7m${t}\x1b[27m`,
+			fg:
+				typeof theme?.fg === "function"
+					? theme.fg.bind(theme)
+					: (_color, t) => t,
+			bg:
+				typeof theme?.bg === "function"
+					? theme.bg.bind(theme)
+					: (_color, t) => t,
+			bold:
+				typeof theme?.bold === "function"
+					? theme.bold.bind(theme)
+					: (t) => `\x1b[1m${t}\x1b[22m`,
+			italic:
+				typeof theme?.italic === "function"
+					? theme.italic.bind(theme)
+					: (t) => `\x1b[3m${t}\x1b[23m`,
+			inverse:
+				typeof theme?.inverse === "function"
+					? theme.inverse.bind(theme)
+					: (t) => `\x1b[7m${t}\x1b[27m`,
 			icon: {
 				warning: theme?.icon?.warning ?? "⚠️",
 				rewind: theme?.icon?.rewind ?? "⤺",
@@ -140,7 +175,10 @@ export class DuplicateNotificationComponent {
 	}
 
 	render(width = 80): readonly string[] {
-		const targetWidth = typeof width === "number" && !Number.isNaN(width) ? Math.max(30, width - 4) : 76;
+		const targetWidth =
+			typeof width === "number" && !Number.isNaN(width)
+				? Math.max(30, width - 4)
+				: 76;
 		const theme = this.#theme;
 		const lines: string[] = [];
 
@@ -171,7 +209,9 @@ export class DuplicateNotificationComponent {
 
 		// Content
 		if (clones.length === 0) {
-			const rawDesc = (this.#data.content || "Duplicated code found in recent changes.").trim();
+			const rawDesc = (
+				this.#data.content || "Duplicated code found in recent changes."
+			).trim();
 			const snippetLines = rawDesc.split("\n");
 			if (!this.#expanded && snippetLines.length > 2) {
 				lines.push(theme.italic(`${snippetLines.slice(0, 2).join(" ")}…`));
@@ -208,7 +248,9 @@ export class DuplicateNotificationComponent {
 			}
 		} else {
 			// Multi-clone display
-			const visible = this.#expanded ? clones : clones.slice(0, MAX_COLLAPSED_CLONES);
+			const visible = this.#expanded
+				? clones
+				: clones.slice(0, MAX_COLLAPSED_CLONES);
 			for (let i = 0; i < visible.length; i++) {
 				const clone = visible[i]!;
 				const a = clone.duplicationA;
@@ -254,7 +296,9 @@ export class DuplicateNotificationComponent {
 		});
 
 		// Add top/bottom empty line with inverse warning background for box effect
-		const emptyBoxLine = theme.inverse(theme.fg("warning", " ".repeat(targetWidth)));
+		const emptyBoxLine = theme.inverse(
+			theme.fg("warning", " ".repeat(targetWidth)),
+		);
 		const boxed = [emptyBoxLine, ...paddedLines, emptyBoxLine];
 
 		// Leading spacer line above the box (matching TtsrNotificationComponent Spacer(1))
