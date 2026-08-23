@@ -26,6 +26,7 @@ export interface DuplicateNotificationData {
 	clones?: CloneItem[];
 	content?: string;
 	title?: string;
+	artifactId?: string;
 }
 
 export interface DuplicateStatusData {
@@ -63,6 +64,7 @@ const MAX_COLLAPSED_CLONES = 4;
 export function parseClonesFromText(text: string): {
 	filePath: string;
 	clones: CloneItem[];
+	artifactId?: string;
 } {
 	let filePath = "";
 	const fileMatch = text.match(/file="([^"]+)"/) || text.match(/in '([^']+)'/);
@@ -115,8 +117,12 @@ export function parseClonesFromText(text: string): {
 			},
 		});
 	}
+	const artifactMatch =
+		text.match(/\[raw output: artifact:\/\/([\w.-]+)\]/) ||
+		text.match(/artifact:\/\/([\w.-]+)/);
+	const artifactId = artifactMatch ? artifactMatch[1] : undefined;
 
-	return { filePath, clones };
+	return { filePath, clones, artifactId };
 }
 /**
  * Convert a sourceId (possibly virtual or absolute) to a clean relative display path.
@@ -256,13 +262,17 @@ export class DuplicateNotificationComponent {
 
 		let rawFilePath = this.#data.filePath || "";
 		let clones = this.#data.clones || [];
+		let artifactId = this.#data.artifactId;
 
-		if ((!rawFilePath || clones.length === 0) && this.#data.content) {
+		if (
+			(!rawFilePath || clones.length === 0 || !artifactId) &&
+			this.#data.content
+		) {
 			const parsed = parseClonesFromText(this.#data.content);
 			if (!rawFilePath) rawFilePath = parsed.filePath;
 			if (clones.length === 0) clones = parsed.clones;
+			if (!artifactId) artifactId = parsed.artifactId;
 		}
-
 		const filePath = toDisplayPath(rawFilePath);
 
 		// Header
@@ -357,9 +367,18 @@ export class DuplicateNotificationComponent {
 
 			const hidden = clones.length - visible.length;
 			if (hidden > 0) {
-				lines.push(theme.italic(`… +${hidden} more (ctrl+o to expand)`));
+				const artifactNote = artifactId ? ` • artifact://${artifactId}` : "";
+				lines.push(
+					theme.italic(`… +${hidden} more (ctrl+o to expand${artifactNote})`),
+				);
 			} else if (!this.#expanded && clones.length > 0) {
-				lines.push(theme.italic(" (ctrl+o to expand)"));
+				const artifactNote = artifactId ? ` • artifact://${artifactId}` : "";
+				lines.push(theme.italic(` (ctrl+o to expand${artifactNote})`));
+			}
+
+			if (this.#expanded && artifactId) {
+				lines.push("");
+				lines.push(theme.italic(`Full report: artifact://${artifactId}`));
 			}
 		}
 		// Defensive flattening: ensure no element in lines contains embedded newlines or raw tabs

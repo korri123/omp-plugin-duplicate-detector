@@ -667,45 +667,122 @@ export class JscpdIndexManager {
 	formatReport(
 		clones: IClone[] = this.#discoveredClones,
 		scanPath = this.#rootDir,
+		options?: FormatReportOptions,
 	): string {
-		let report = `# Duplicate Code Report\n\n`;
-		report += `- **Indexed Files**: ${this.#indexedFiles.size}\n`;
-		report += `- **Scan Target**: \`${scanPath || "."}\`\n`;
-		report += `- **Duplicate Clusters Found**: ${clones.length}\n`;
+		return formatReport(clones, scanPath, {
+			indexedCount: this.#indexedFiles.size,
+			baselineStatus: this.#baselineStatus,
+			maxIndexedFiles: this.#options.maxIndexedFiles ?? MAX_INDEXED_FILES,
+			minLines: this.#options.minLines,
+			minTokens: this.#options.minTokens,
+			...options,
+		});
+	}
+}
 
-		if (this.#baselineStatus === "skipped_not_git") {
-			report += `- **Baseline Status**: Skipped (Directory is not inside a Git working tree; automatic scan requires Git-tracked files)\n`;
-		} else if (this.#baselineStatus === "capped_file_count") {
-			const maxFiles = this.#options.maxIndexedFiles ?? MAX_INDEXED_FILES;
-			report += `- **Baseline Status**: Capped at ${maxFiles} files limit\n`;
-		} else if (this.#baselineStatus === "capped_source_bytes") {
-			report += `- **Baseline Status**: Capped at 64 MiB total source size limit\n`;
-		}
+export const DEFAULT_MAX_INLINE_CLONES = 15;
+export const DEFAULT_MAX_INLINE_BYTES = 50 * 1024; // 50 KB (matching oh-my-pi DEFAULT_MAX_BYTES)
 
-		report += `\n`;
+export interface FormatReportOptions {
+	indexedCount?: number;
+	baselineStatus?: BaselineStatus;
+	maxIndexedFiles?: number;
+	minLines?: number;
+	minTokens?: number;
+	maxClones?: number;
+	maxBytes?: number;
+	artifactId?: string;
+}
 
-		if (clones.length === 0) {
-			report += `No duplicate code blocks found matching threshold (minLines: ${this.#options.minLines}, minTokens: ${this.#options.minTokens}).\n`;
-			return report;
-		}
+/**
+ * Formats discovered clone clusters into a Markdown report.
+ * Supports top-N capping and byte limits with artifact:// recovery links matching oh-my-pi conventions.
+ */
+export function formatReport(
+	clones: IClone[] = [],
+	scanPath = ".",
+	options?: FormatReportOptions,
+): string {
+	let report = "# Duplicate Code Report\n\n";
+	if (typeof options?.indexedCount === "number") {
+		report += `- **Indexed Files**: ${options.indexedCount}\n`;
+	}
+	report += `- **Scan Target**: \`${scanPath || "."}\`\n`;
+	report += `- **Duplicate Clusters Found**: ${clones.length}\n`;
 
-		report += `## Detected Clones\n\n`;
-		for (let i = 0; i < clones.length; i++) {
-			const clone = clones[i]!;
-			const a = clone.duplicationA;
-			const b = clone.duplicationB;
-			const linesCount = a.end.line - a.start.line + 1;
+	if (options?.baselineStatus === "skipped_not_git") {
+		report +=
+			"- **Baseline Status**: Skipped (Directory is not inside a Git working tree; automatic scan requires Git-tracked files)\n";
+	} else if (options?.baselineStatus === "capped_file_count") {
+		const maxFiles = (
+			options?.maxIndexedFiles ?? MAX_INDEXED_FILES
+		).toLocaleString();
+		report += `- **Baseline Status**: Capped at ${maxFiles} files limit\n`;
+	} else if (options?.baselineStatus === "capped_source_bytes") {
+		report +=
+			"- **Baseline Status**: Capped at 64 MiB total source size limit\n";
+	}
 
-			report += `### Clone #${i + 1} (${linesCount} lines, format: ${clone.format})\n`;
-			report += `- **Location A**: \`${a.sourceId}:${a.start.line}-${a.end.line}\`\n`;
-			report += `- **Location B**: \`${b.sourceId}:${b.start.line}-${b.end.line}\`\n`;
+	report += "\n";
 
-			if (a.fragment) {
-				report += `\n\`\`\`${clone.format}\n${a.fragment.trim()}\n\`\`\`\n`;
-			}
-			report += `\n`;
-		}
-
+	if (clones.length === 0) {
+		const minLines = options?.minLines ?? 5;
+		const minTokens = options?.minTokens ?? 40;
+		report += `No duplicate code blocks found matching threshold (minLines: ${minLines}, minTokens: ${minTokens}).\n`;
 		return report;
 	}
+
+	report += "## Detected Clones\n\n";
+
+	const maxClones = options?.maxClones;
+	const maxBytes = options?.maxBytes;
+	const artifactId = options?.artifactId;
+
+	const countToRender =
+		typeof maxClones === "number" && maxClones > 0
+			? Math.min(clones.length, maxClones)
+			: clones.length;
+
+	let renderedClones = 0;
+
+	for (let i = 0; i < countToRender; i++) {
+		const clone = clones[i]!;
+		const a = clone.duplicationA;
+		const b = clone.duplicationB;
+		const linesCount = a.end.line - a.start.line + 1;
+
+		let block = `### Clone #${i + 1} (${linesCount} lines, format: ${clone.format})\n`;
+		block += `- **Location A**: \`${a.sourceId}:${a.start.line}-${a.end.line}\`\n`;
+		block += `- **Location B**: \`${b.sourceId}:${b.start.line}-${b.end.line}\`\n`;
+
+		if (a.fragment) {
+			block += `\n\`\`\`${clone.format}\n${a.fragment.trim()}\n\`\`\`\n`;
+		}
+		block += "\n";
+
+		if (typeof maxBytes === "number" && maxBytes > 0) {
+			const estimatedTotal = Buffer.byteLength(report + block, "utf-8") + 512;
+			if (renderedClones > 0 && estimatedTotal > maxBytes) {
+				break;
+			}
+		}
+
+		report += block;
+		renderedClones++;
+	}
+
+	const omittedCount = clones.length - renderedClones;
+	if (omittedCount > 0) {
+		report += `*Showing top ${renderedClones} of ${clones.length} duplicate clusters (${omittedCount} additional cluster${omittedCount === 1 ? "" : "s"} omitted from inline context).*`;
+		if (artifactId) {
+			report += `\n*Read \`artifact://${artifactId}\` for the complete report with all ${clones.length} duplicate clusters.*`;
+		}
+		report += "\n\n";
+	}
+
+	if (artifactId) {
+		report += `[raw output: artifact://${artifactId}]\n`;
+	}
+
+	return report;
 }

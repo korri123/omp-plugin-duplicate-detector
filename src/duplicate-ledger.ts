@@ -66,14 +66,26 @@ export class DuplicateLedger {
 		filePath: string,
 		targetFileContent?: string,
 		basePath?: string,
+		options?: {
+			maxClones?: number;
+			maxSnippetLines?: number;
+			artifactId?: string;
+		},
 	): string {
 		if (clones.length === 0) return "";
-
 		const displayTargetFile = toDisplayPath(filePath, basePath);
 		let reminder = `<system-reminder reason="code_duplication" file="${displayTargetFile}">\n`;
 		reminder += `Warning: Duplicated code detected in '${displayTargetFile}'. Consider refactoring into a shared helper or reusing existing logic.\n\n`;
 
-		for (let i = 0; i < clones.length; i++) {
+		const maxClones = options?.maxClones ?? 4;
+		const count =
+			typeof maxClones === "number" && maxClones > 0
+				? Math.min(clones.length, maxClones)
+				: clones.length;
+
+		const maxSnippetLines = options?.maxSnippetLines ?? 8;
+
+		for (let i = 0; i < count; i++) {
 			const clone = clones[i]!;
 			const a = clone.duplicationA;
 			const b = clone.duplicationB;
@@ -84,15 +96,35 @@ export class DuplicateLedger {
 			reminder += `### Duplicate #${i + 1} (${linesCount} lines, format: ${clone.format})\n`;
 			reminder += `- Current change: \`${srcA}:${a.start.line}-${a.end.line}\` (lines ${a.start.line} to ${a.end.line})\n`;
 			reminder += `- Pre-existing copy: \`${srcB}:${b.start.line}-${b.end.line}\` (lines ${b.start.line} to ${b.end.line})\n`;
-			const snippet =
+			const rawSnippet =
 				a.fragment ||
 				(targetFileContent
 					? extractLineRange(targetFileContent, a.start.line, a.end.line)
 					: "");
-			if (snippet.trim()) {
-				reminder += `\n\`\`\`${clone.format}\n${snippet.trim()}\n\`\`\`\n`;
+			const snippet = rawSnippet.trim();
+			if (snippet) {
+				let displaySnippet = snippet;
+				if (typeof maxSnippetLines === "number" && maxSnippetLines > 0) {
+					const lines = snippet.split(/\r?\n/);
+					if (lines.length > maxSnippetLines) {
+						displaySnippet = `${lines.slice(0, maxSnippetLines).join("\n")}\n// ... +${lines.length - maxSnippetLines} more duplicate lines`;
+					}
+				}
+				reminder += `\n\`\`\`${clone.format}\n${displaySnippet}\n\`\`\`\n`;
 			}
 			reminder += `\n`;
+		}
+
+		const omittedCount = clones.length - count;
+		if (omittedCount > 0 || options?.artifactId) {
+			if (omittedCount > 0) {
+				reminder += `*... and ${omittedCount} more duplicate block${omittedCount === 1 ? "" : "s"} in this file.*\n`;
+			}
+			if (options?.artifactId) {
+				reminder += `*Read \`artifact://${options.artifactId}\` for complete duplicate report with all ${clones.length} duplicate blocks.*\n`;
+				reminder += `\n[raw output: artifact://${options.artifactId}]\n`;
+			}
+			reminder += "\n";
 		}
 
 		reminder += `</system-reminder>\n`;

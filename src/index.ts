@@ -14,6 +14,10 @@ import { DuplicateLedger } from "./duplicate-ledger";
 import {
 	type BaselineStatus,
 	createIgnoreFilter,
+	DEFAULT_MAX_INLINE_BYTES,
+	DEFAULT_MAX_INLINE_CLONES,
+	type FormatReportOptions,
+	formatReport,
 	isGeneratedContent,
 	JscpdIndexManager,
 	MAX_INDEXED_FILES,
@@ -174,64 +178,6 @@ export function createEngineFromConfig(
 		formatsExts: config.formatsExts,
 		maxIndexedFiles: overrides.maxIndexedFiles ?? config.maxIndexedFiles,
 	});
-}
-
-/**
- * Formats discovered clone clusters into a Markdown report.
- */
-export function formatReport(
-	clones: IClone[] = [],
-	scanPath = ".",
-	options?: {
-		indexedCount?: number;
-		baselineStatus?: BaselineStatus;
-		minLines?: number;
-		minTokens?: number;
-	},
-): string {
-	let report = "# Duplicate Code Report\n\n";
-	if (typeof options?.indexedCount === "number") {
-		report += `- **Indexed Files**: ${options.indexedCount}\n`;
-	}
-	report += `- **Scan Target**: \`${scanPath || "."}\`\n`;
-	report += `- **Duplicate Clusters Found**: ${clones.length}\n`;
-
-	if (options?.baselineStatus === "skipped_not_git") {
-		report +=
-			"- **Baseline Status**: Skipped (Directory is not inside a Git working tree; automatic scan requires Git-tracked files)\n";
-	} else if (options?.baselineStatus === "capped_file_count") {
-		report += "- **Baseline Status**: Capped at 2,500 file limit\n";
-	} else if (options?.baselineStatus === "capped_source_bytes") {
-		report += "- **Baseline Status**: Capped at 64 MB limit\n";
-	}
-
-	report += "\n";
-
-	if (clones.length === 0) {
-		const minLines = options?.minLines ?? 5;
-		const minTokens = options?.minTokens ?? 40;
-		report += `No duplicate code blocks found matching threshold (minLines: ${minLines}, minTokens: ${minTokens}).\n`;
-		return report;
-	}
-
-	report += "## Detected Clones\n\n";
-	for (let i = 0; i < clones.length; i++) {
-		const clone = clones[i]!;
-		const a = clone.duplicationA;
-		const b = clone.duplicationB;
-		const linesCount = a.end.line - a.start.line + 1;
-
-		report += `### Clone #${i + 1} (${linesCount} lines, format: ${clone.format})\n`;
-		report += `- **Location A**: \`${a.sourceId}:${a.start.line}-${a.end.line}\`\n`;
-		report += `- **Location B**: \`${b.sourceId}:${b.start.line}-${b.end.line}\`\n`;
-
-		if (a.fragment) {
-			report += `\n\`\`\`${clone.format}\n${a.fragment.trim()}\n\`\`\`\n`;
-		}
-		report += "\n";
-	}
-
-	return report;
 }
 
 function extractSettingsObject(
@@ -626,15 +572,51 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 				const freshClones = ledger.filterFreshClones(normalizedRelPath, clones);
 
 				if (freshClones.length > 0) {
+					const fullReminder = ledger.formatReminder(
+						freshClones,
+						normalizedRelPath,
+						content,
+						undefined,
+						{ maxClones: 0, maxSnippetLines: 0 },
+					);
+
+					let artifactId: string | undefined;
+					const fullBytes = Buffer.byteLength(fullReminder, "utf-8");
+					const needsTruncation =
+						freshClones.length > 4 || fullBytes > 8 * 1024;
+
+					if (needsTruncation && ctx?.sessionManager?.saveArtifact) {
+						try {
+							artifactId = await ctx.sessionManager.saveArtifact(
+								fullReminder,
+								"duplicates",
+							);
+						} catch (err) {
+							pi.logger.warn(
+								"Failed to persist mutation duplicate warning to session artifact",
+								{
+									error: err instanceof Error ? err.message : String(err),
+								},
+							);
+						}
+					}
+
 					const reminder = ledger.formatReminder(
 						freshClones,
 						normalizedRelPath,
 						content,
+						undefined,
+						{
+							maxClones: 4,
+							maxSnippetLines: 8,
+							artifactId,
+						},
 					);
 
 					pi.logger.info("Duplicates detected on file mutation", {
 						file: normalizedRelPath,
 						count: freshClones.length,
+						artifactId,
 					});
 
 					if (config.reminderMode === "steer") {
@@ -648,6 +630,7 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 									filePath: normalizedRelPath,
 									clones: freshClones,
 									content,
+									artifactId,
 								},
 							},
 							{ deliverAs: "steer" },
@@ -683,9 +666,19 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 	async function executeScan(
 		targetPath: string,
 		options: { minLines?: number; minTokens?: number } = {},
+		scanCtx?: {
+			sessionManager?: {
+				saveArtifact?: (
+					content: string,
+					toolType: string,
+				) => Promise<string | undefined>;
+			};
+		},
 	): Promise<{
 		clones: IClone[];
 		report: string;
+		fullReport: string;
+		artifactId?: string;
 		configSource: string | null;
 	}> {
 		const projectConfig =
@@ -735,14 +728,48 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 			clones = await coordinator.scan();
 		}
 
-		const report = formatReport(clones, targetPath, {
+		const fullReport = formatReport(clones, targetPath, {
 			minLines,
 			minTokens,
 		});
 
+		let artifactId: string | undefined;
+		const fullReportBytes = Buffer.byteLength(fullReport, "utf-8");
+		const needsTruncation =
+			clones.length > DEFAULT_MAX_INLINE_CLONES ||
+			fullReportBytes > DEFAULT_MAX_INLINE_BYTES;
+
+		if (needsTruncation && scanCtx?.sessionManager?.saveArtifact) {
+			try {
+				artifactId = await scanCtx.sessionManager.saveArtifact(
+					fullReport,
+					"duplicates",
+				);
+			} catch (err) {
+				pi.logger.warn(
+					"Failed to persist duplicates report to session artifact",
+					{
+						error: err instanceof Error ? err.message : String(err),
+					},
+				);
+			}
+		}
+
+		const report = needsTruncation
+			? formatReport(clones, targetPath, {
+					minLines,
+					minTokens,
+					maxClones: DEFAULT_MAX_INLINE_CLONES,
+					maxBytes: DEFAULT_MAX_INLINE_BYTES,
+					artifactId,
+				})
+			: fullReport;
+
 		return {
 			clones,
 			report,
+			fullReport,
+			artifactId,
 			configSource: effectiveConfig.configSource ?? null,
 		};
 	}
@@ -805,10 +832,14 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 				: ctx.cwd;
 
 			try {
-				const { clones, report, configSource } = await executeScan(scanPath, {
-					minLines: params.minLines,
-					minTokens: params.minTokens,
-				});
+				const { clones, report, artifactId, configSource } = await executeScan(
+					scanPath,
+					{
+						minLines: params.minLines,
+						minTokens: params.minTokens,
+					},
+					ctx,
+				);
 
 				if (signal?.aborted) {
 					return {
@@ -830,6 +861,7 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 						clones,
 						scanPath,
 						configSource,
+						artifactId,
 					},
 				};
 			} catch (err) {
@@ -882,10 +914,14 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 			}
 
 			try {
-				const { clones, report } = await executeScan(targetPath, {
-					minLines: cliMinLines,
-					minTokens: cliMinTokens,
-				});
+				const { clones, report, artifactId } = await executeScan(
+					targetPath,
+					{
+						minLines: cliMinLines,
+						minTokens: cliMinTokens,
+					},
+					ctx,
+				);
 
 				pi.sendMessage(
 					{
@@ -897,6 +933,7 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 							filePath: targetPath,
 							clones,
 							content: report,
+							artifactId,
 						},
 					},
 					{ triggerTurn: false },
