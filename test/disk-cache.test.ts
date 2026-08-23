@@ -10,8 +10,11 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import * as zlib from "node:zlib";
 import { Tokenizer } from "@jscpd/tokenizer";
 import {
+	CACHE_FORMAT_MAGIC,
+	CACHE_FORMAT_VERSION,
 	computeConfigFingerprint,
 	computeShardKey,
 	computeWorkspaceCacheDir,
@@ -604,86 +607,67 @@ export function formatCurrency(amount: number, currency = "USD"): string {
 				);
 			}
 		});
+		it("clears old shards and resets schema on SQLite cache version mismatch", async () => {
+			const dbPath = computeWorkspaceCachePath(
+				cacheBaseDir,
+				workspaceDir,
+				"default",
+			);
+			await fs.mkdir(path.dirname(dbPath), { recursive: true });
 
-		it("unpacks legacy DUP2 binary frame shards seamlessly from SQLite", async () => {
+			// Simulate a pre-existing cache database with user_version = 1 (outdated)
+			const rawDb = new Database(dbPath, { create: true });
+			rawDb.exec(`
+				PRAGMA user_version = 1;
+				CREATE TABLE shards (
+					rel_path TEXT NOT NULL PRIMARY KEY,
+					content_hash TEXT NOT NULL,
+					payload BLOB NOT NULL,
+					mtime REAL NOT NULL
+				);
+				INSERT INTO shards VALUES ('old/file.ts', 'hash_old', X'001122', 1000);
+			`);
+			rawDb.close();
+
+			// Initialize DiskCacheManager against this workspace
 			const cacheManager = new DiskCacheManager({
 				rootDir: workspaceDir,
 				cacheDir: cacheBaseDir,
 			});
 
-			const relPath = "src/legacy-dup2.ts";
-			const fullPath = path.join(workspaceDir, relPath);
-			const contentHash = "legacy_dup2_hash_12345";
+			// Cache should clear old entries on version difference and allow fresh writes
+			const oldShard = await cacheManager.getShard("old/file.ts", "hash_old");
+			expect(oldShard).toBeNull();
 
-			const legacyShard: SerializedSourceShard = {
-				version: 1,
-				sourceId: fullPath,
-				contentHash,
-				format: "typescript",
-				size: 100,
-				lines: 10,
-				tokenCount: 50,
-				frames: [
-					{
-						id: "hash_001_legacy_frame",
-						sourceId: fullPath,
-						start: {
-							line: 1,
-							column: 1,
-							position: 0,
-							range: [0, 5],
-							type: "keyword",
-							value: "const",
-							length: 5,
-							format: "typescript",
-						},
-						end: {
-							line: 5,
-							column: 10,
-							position: 80,
-							range: [80, 90],
-							type: "default",
-							value: "value",
-							length: 5,
-							format: "typescript",
-						},
-					},
-				],
+			// Verify PRAGMA user_version updated to CACHE_FORMAT_VERSION
+			const verifyDb = new Database(dbPath, { readonly: true });
+			const versionRow = verifyDb.query("PRAGMA user_version;").get() as {
+				user_version: number;
 			};
+			expect(versionRow.user_version).toBe(CACHE_FORMAT_VERSION);
+			const rowCount = verifyDb
+				.query("SELECT COUNT(*) as count FROM shards")
+				.get() as { count: number };
+			expect(rowCount.count).toBe(0);
+			verifyDb.close();
 
-			// Save using saveShard without tokens (forces DUP2 packing into SQLite)
-			await cacheManager.saveShard(legacyShard, relPath);
-
-			const retrieved = await cacheManager.getShard(relPath, contentHash);
-			expect(retrieved).not.toBeNull();
-			expect(retrieved?.sourceId).toBe(fullPath);
-			expect(retrieved?.contentHash).toBe(contentHash);
-			const frames = retrieved?.frames ?? [];
-			expect(frames.length).toBe(1);
-			expect(frames[0]?.id).toBe("hash_001_legacy_frame");
 			cacheManager.close();
 		});
 
-		it("demonstrates significant size reduction for DUP3 token format vs DUP2 frame format", () => {
-			const index = new SourceAwareCloneIndex({ minTokens: 10, minLines: 3 });
-			const filePath = "src/size-test.ts";
-			const contentHash = "size_test_hash";
+		it("rejects and purges shards with mismatched magic or binary version", () => {
+			// Create a buffer with invalid magic
+			const invalidMagicBuf = Buffer.alloc(32);
+			invalidMagicBuf.write("BAD0", 0, 4, "ascii");
+			invalidMagicBuf.writeUInt16LE(1, 4);
+			const compressedInvalidMagic = zlib.deflateRawSync(invalidMagicBuf);
+			expect(unpackBinaryShard(compressedInvalidMagic)).toBeNull();
 
-			index.addSource(filePath, sampleCodeA);
-			const shard = index.exportSourceShard(filePath, contentHash)!;
-
-			// Pack with tokens (DUP3)
-			const dup3Packed = packBinaryShard(shard);
-
-			// Pack without tokens (DUP2 frame-based)
-			const legacyShard: SerializedSourceShard = {
-				...shard,
-				tokens: undefined,
-				frames: shard.frames,
-			};
-			const dup2Packed = packBinaryShard(legacyShard);
-
-			expect(dup3Packed.length).toBeLessThan(dup2Packed.length);
+			// Create a buffer with valid magic but mismatched version
+			const invalidVerBuf = Buffer.alloc(32);
+			invalidVerBuf.write(CACHE_FORMAT_MAGIC, 0, 4, "ascii");
+			invalidVerBuf.writeUInt16LE(999, 4);
+			const compressedInvalidVer = zlib.deflateRawSync(invalidVerBuf);
+			expect(unpackBinaryShard(compressedInvalidVer)).toBeNull();
 		});
 
 		it("handles database close gracefully and fails open on subsequent calls", async () => {

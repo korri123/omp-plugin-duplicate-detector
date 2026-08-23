@@ -133,18 +133,17 @@ export function computeShardKey(
 		.digest("hex");
 }
 
+/** Current binary format magic identifier ('DUP3') */
+export const CACHE_FORMAT_MAGIC = "DUP3";
+
+/** Current binary format & SQLite schema version */
+export const CACHE_FORMAT_VERSION = 3;
+
 /**
- * Encodes a SerializedSourceShard into a high-density, zlib-compressed binary buffer.
- * Prefers ultra-compact DUP3 token format; falls back to DUP2 frame format.
+ * Encodes a SerializedSourceShard into a high-density, zlib-compressed binary buffer (DUP3 format).
  */
 export function packBinaryShard(shard: SerializedSourceShard): Buffer {
-	if (shard.tokens && shard.tokens.length > 0) {
-		return packBinaryShardV3(shard, shard.tokens);
-	}
-	if (shard.frames && shard.frames.length > 0) {
-		return packBinaryShardV2(shard, shard.frames);
-	}
-	return packBinaryShardV3(shard, []);
+	return packBinaryShardV3(shard, shard.tokens ?? []);
 }
 
 /**
@@ -284,124 +283,20 @@ function packBinaryShardV3(
 }
 
 /**
- * Packs legacy sliding-window frames into DUP2 format.
- */
-function packBinaryShardV2(
-	shard: SerializedSourceShard,
-	frames: SourceFrame[],
-): Buffer {
-	const srcIdBuf = Buffer.from(shard.sourceId, "utf8");
-	const formatBuf = Buffer.from(shard.format, "utf8");
-	const hashBuf = Buffer.from(shard.contentHash, "utf8");
-
-	let framesPayloadLen = 0;
-	const frameCount = frames.length;
-	const frameIdBufs = new Array<Buffer>(frameCount);
-	for (let i = 0; i < frameCount; i++) {
-		const idBuf = Buffer.from(frames[i]!.id, "utf8");
-		frameIdBufs[i] = idBuf;
-		framesPayloadLen += 1 + idBuf.length + 32; // 1b idLen + idBuf + 8 * 4b coords
-	}
-
-	const headerLen =
-		4 + // magic 'DUP2'
-		2 + // version (2)
-		2 +
-		formatBuf.length +
-		2 +
-		hashBuf.length +
-		4 + // size
-		4 + // lines
-		4 + // tokenCount
-		8 + // updatedAt
-		2 +
-		srcIdBuf.length +
-		4; // frameCount
-
-	const buf = Buffer.allocUnsafe(headerLen + framesPayloadLen);
-
-	let pos = 0;
-	buf.write("DUP2", pos, 4, "ascii");
-	pos += 4;
-	buf.writeUInt16LE(2, pos);
-	pos += 2;
-
-	buf.writeUInt16LE(formatBuf.length, pos);
-	pos += 2;
-	formatBuf.copy(buf, pos);
-	pos += formatBuf.length;
-
-	buf.writeUInt16LE(hashBuf.length, pos);
-	pos += 2;
-	hashBuf.copy(buf, pos);
-	pos += hashBuf.length;
-
-	buf.writeUInt32LE(shard.size, pos);
-	pos += 4;
-	buf.writeUInt32LE(shard.lines, pos);
-	pos += 4;
-	buf.writeUInt32LE(shard.tokenCount, pos);
-	pos += 4;
-	buf.writeDoubleLE(shard.updatedAt ?? Date.now(), pos);
-	pos += 8;
-
-	buf.writeUInt16LE(srcIdBuf.length, pos);
-	pos += 2;
-	srcIdBuf.copy(buf, pos);
-	pos += srcIdBuf.length;
-
-	buf.writeUInt32LE(frameCount, pos);
-	pos += 4;
-
-	for (let i = 0; i < frameCount; i++) {
-		const f = frames[i]!;
-		const idBuf = frameIdBufs[i]!;
-		buf.writeUInt8(idBuf.length, pos);
-		pos += 1;
-		idBuf.copy(buf, pos);
-		pos += idBuf.length;
-
-		buf.writeInt32LE(f.start.loc?.start.line ?? f.start.line ?? 1, pos);
-		pos += 4;
-		buf.writeInt32LE(f.start.loc?.start.column ?? f.start.column ?? 1, pos);
-		pos += 4;
-		buf.writeInt32LE(f.start.loc?.start.position ?? f.start.position ?? 0, pos);
-		pos += 4;
-		buf.writeInt32LE(f.start.range ? f.start.range[0] : 0, pos);
-		pos += 4;
-		buf.writeInt32LE(f.end.loc?.end.line ?? f.end.line ?? 1, pos);
-		pos += 4;
-		buf.writeInt32LE(f.end.loc?.end.column ?? f.end.column ?? 1, pos);
-		pos += 4;
-		buf.writeInt32LE(f.end.loc?.end.position ?? f.end.position ?? 0, pos);
-		pos += 4;
-		buf.writeInt32LE(f.end.range ? f.end.range[1] : 0, pos);
-		pos += 4;
-	}
-
-	return zlib.deflateRawSync(buf);
-}
-
-/**
  * Decodes a zlib-compressed binary buffer into a SerializedSourceShard.
- * Supports both DUP3 (Token-based) and DUP2 (Frame-based legacy) formats.
- * Returns null if invalid or corrupted.
+ * Returns null if invalid, corrupted, or version mismatch (fails open).
  */
 export function unpackBinaryShard(
 	compressed: Buffer,
 ): SerializedSourceShard | null {
 	try {
 		const buf = zlib.inflateRawSync(compressed);
-		if (buf.length < 4) return null;
+		if (buf.length < 6) return null;
 		const magic = buf.toString("ascii", 0, 4);
-
-		if (magic === "DUP3") {
-			return unpackBinaryShardV3(buf);
+		if (magic !== CACHE_FORMAT_MAGIC) {
+			return null;
 		}
-		if (magic === "DUP2") {
-			return unpackBinaryShardV2(buf);
-		}
-		return null;
+		return unpackBinaryShardV3(buf);
 	} catch {
 		return null;
 	}
@@ -512,101 +407,6 @@ function unpackBinaryShardV3(buf: Buffer): SerializedSourceShard | null {
 	};
 }
 
-function unpackBinaryShardV2(buf: Buffer): SerializedSourceShard | null {
-	let pos = 4;
-	const version = buf.readUInt16LE(pos);
-	pos += 2;
-	if (version !== 2) return null;
-
-	const formatLen = buf.readUInt16LE(pos);
-	pos += 2;
-	const format = buf.toString("utf8", pos, pos + formatLen);
-	pos += formatLen;
-
-	const hashLen = buf.readUInt16LE(pos);
-	pos += 2;
-	const contentHash = buf.toString("utf8", pos, pos + hashLen);
-	pos += hashLen;
-
-	const size = buf.readUInt32LE(pos);
-	pos += 4;
-	const lines = buf.readUInt32LE(pos);
-	pos += 4;
-	const tokenCount = buf.readUInt32LE(pos);
-	pos += 4;
-	const updatedAt = buf.readDoubleLE(pos);
-	pos += 8;
-
-	const srcLen = buf.readUInt16LE(pos);
-	pos += 2;
-	const sourceId = buf.toString("utf8", pos, pos + srcLen);
-	pos += srcLen;
-
-	const frameCount = buf.readUInt32LE(pos);
-	pos += 4;
-	const frames = new Array<SourceFrame>(frameCount);
-
-	for (let i = 0; i < frameCount; i++) {
-		const idLen = buf.readUInt8(pos);
-		pos += 1;
-		const id = buf.toString("utf8", pos, pos + idLen);
-		pos += idLen;
-		const startLine = buf.readInt32LE(pos);
-		pos += 4;
-		const startCol = buf.readInt32LE(pos);
-		pos += 4;
-		const startPos = buf.readInt32LE(pos);
-		pos += 4;
-		const startRange0 = buf.readInt32LE(pos);
-		pos += 4;
-		const endLine = buf.readInt32LE(pos);
-		pos += 4;
-		const endCol = buf.readInt32LE(pos);
-		pos += 4;
-		const endPos = buf.readInt32LE(pos);
-		pos += 4;
-		const endRange1 = buf.readInt32LE(pos);
-		pos += 4;
-
-		frames[i] = {
-			id,
-			sourceId,
-			start: {
-				line: startLine,
-				column: startCol,
-				position: startPos,
-				range: [startRange0, startRange0],
-				loc: {
-					start: { line: startLine, column: startCol, position: startPos },
-					end: { line: startLine, column: startCol, position: startPos },
-				},
-			},
-			end: {
-				line: endLine,
-				column: endCol,
-				position: endPos,
-				range: [endRange1, endRange1],
-				loc: {
-					start: { line: endLine, column: endCol, position: endPos },
-					end: { line: endLine, column: endCol, position: endPos },
-				},
-			},
-		};
-	}
-
-	return {
-		version: 1,
-		sourceId,
-		contentHash,
-		format,
-		size,
-		lines,
-		tokenCount,
-		updatedAt,
-		frames,
-	};
-}
-
 /**
  * Manages persistent SQLite database caching, hydration, and lifecycle of tokenized source shards.
  */
@@ -657,6 +457,16 @@ export class DiskCacheManager {
 			db.exec("PRAGMA journal_mode = WAL;");
 			db.exec("PRAGMA synchronous = NORMAL;");
 			db.exec("PRAGMA temp_store = MEMORY;");
+
+			// Clear cache and reset schema on version difference
+			const versionRow = db.query("PRAGMA user_version;").get() as
+				| { user_version: number }
+				| undefined;
+			const schemaVersion = versionRow?.user_version ?? 0;
+			if (schemaVersion !== CACHE_FORMAT_VERSION) {
+				db.exec("DROP TABLE IF EXISTS shards;");
+				db.exec(`PRAGMA user_version = ${CACHE_FORMAT_VERSION};`);
+			}
 
 			db.exec(`
 				CREATE TABLE IF NOT EXISTS shards (
@@ -746,6 +556,13 @@ export class DiskCacheManager {
 					// Non-fatal
 				}
 				return shard;
+			}
+
+			// If shard was corrupted or outdated version, clean up the invalid row
+			try {
+				this.#deleteStmt?.run(normalizedRelPath);
+			} catch {
+				// Non-fatal
 			}
 
 			return null;
