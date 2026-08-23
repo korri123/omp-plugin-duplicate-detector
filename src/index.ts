@@ -303,6 +303,30 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 	const fileRevisions = new Map<string, number>();
 	const coordinator = new DuplicateDetectorCoordinator();
 
+	let workerFailureNotified = false;
+	const notifyWorkerFailure = (error: unknown): void => {
+		if (workerFailureNotified || !lastCtx) return;
+		workerFailureNotified = true;
+		const reason = error instanceof Error ? error.message : String(error);
+		const message = `Duplicate detector: Background worker failed (${reason})`;
+
+		lastCtx.ui?.notify?.(message, "error");
+		pi.sendMessage(
+			{
+				customType: "duplicate-detector-status",
+				content: message,
+				display: true,
+				attribution: "user",
+				details: {
+					status: "failed",
+					error: reason,
+					content: message,
+				},
+			},
+			{ triggerTurn: false },
+		);
+	};
+
 	// Wire coordinator event listeners
 	coordinator.on("progress", (payload) => {
 		pi.logger.debug("Duplicate detector indexing progress", {
@@ -312,6 +336,11 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 
 	coordinator.on("complete", (payload) => {
 		const status: BaselineStatus = payload.status ?? "complete";
+		if (status === "failed") {
+			notifyWorkerFailure(payload.error ?? "Baseline indexing failed");
+			return;
+		}
+		workerFailureNotified = false;
 		notifyBaselineStatus(pi, lastCtx, status, payload.indexedCount);
 	});
 
@@ -319,12 +348,16 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 		pi.logger.debug("Duplicate detector worker status", {
 			...payload,
 		});
+		if (payload.status === "error") {
+			notifyWorkerFailure(payload.message ?? "Unknown worker error");
+		}
 	});
 
 	coordinator.on("error", (err) => {
 		pi.logger.warn("Duplicate detector coordinator error", {
 			error: err instanceof Error ? err.message : String(err),
 		});
+		notifyWorkerFailure(err);
 	});
 
 	coordinator.on("lateFinding", async ({ clone }) => {
@@ -403,6 +436,7 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 	pi.on("session_switch", async (event, ctx) => {
 		ledger.clear();
 		fileRevisions.clear();
+		workerFailureNotified = false;
 		if (ctx?.cwd) {
 			currentCwd = ctx.cwd;
 		}
@@ -417,8 +451,8 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 		if (ctx?.cwd) {
 			try {
 				await coordinator.openWorkspace(ctx.cwd, config);
-			} catch {
-				// Ignore background errors
+			} catch (err) {
+				notifyWorkerFailure(err);
 			}
 		}
 	});
@@ -443,6 +477,7 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 		currentCwd = ctx.cwd;
 		lastCtx = ctx as ExtensionContext;
 		fileRevisions.clear();
+		workerFailureNotified = false;
 
 		pi.logger.debug("Duplicate detector initializing workspace index", {
 			cwd: ctx.cwd,
@@ -467,6 +502,7 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 			pi.logger.warn("Duplicate detector background indexing failed", {
 				error: err instanceof Error ? err.message : String(err),
 			});
+			notifyWorkerFailure(err);
 		}
 	});
 
@@ -578,6 +614,7 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 					file: normalizedRelPath,
 					error: err instanceof Error ? err.message : String(err),
 				});
+				notifyWorkerFailure(err);
 			}
 		},
 	);

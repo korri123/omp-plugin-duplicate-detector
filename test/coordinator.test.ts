@@ -102,15 +102,16 @@ export function calculateTaxAmount(income: number, deduction: number, rate: numb
 		await coordinator.dispose();
 	});
 
-	it("fails open gracefully on disposed or invalid calls", async () => {
+	it("propagates mutation failures after disposal", async () => {
 		const coordinator = new DuplicateDetectorCoordinator();
 		await coordinator.dispose();
 
 		const clones = await coordinator.checkSnippet("foo.ts", "some content");
 		expect(clones).toEqual([]);
 
-		const update = await coordinator.checkAndUpdate("foo.ts", "some content");
-		expect(update).toEqual({ clones: [], isComplete: false });
+		await expect(
+			coordinator.checkAndUpdate("foo.ts", "some content"),
+		).rejects.toThrow("DuplicateDetectorCoordinator is disposed");
 	});
 
 	it("handles reconcile and scan requests", async () => {

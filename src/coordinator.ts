@@ -37,7 +37,7 @@ export interface DuplicateDetectorConfig {
 }
 
 export interface CoordinatorOptions {
-	/** Custom worker script URL or path (defaults to ./detector-worker.ts) */
+	/** Custom worker script URL or path (defaults to the packaged worker bundle) */
 	workerUrl?: string | URL;
 	/** Timeout in milliseconds for individual RPC requests (default: 30,000ms) */
 	requestTimeoutMs?: number;
@@ -101,7 +101,7 @@ export class DuplicateDetectorCoordinator extends EventEmitter<CoordinatorEvents
 		super();
 		this.#workerUrl =
 			options.workerUrl ??
-			new URL("./detector-worker.ts", import.meta.url).href;
+			new URL("../dist/detector-worker.js", import.meta.url).href;
 		this.#requestTimeoutMs = options.requestTimeoutMs ?? 30_000;
 		this.#autoRestart = options.autoRestart ?? true;
 		this.#maxRestartAttempts = options.maxRestartAttempts ?? 5;
@@ -387,7 +387,9 @@ export class DuplicateDetectorCoordinator extends EventEmitter<CoordinatorEvents
 	/**
 	 * Check a modified file snippet against the index, update the index for that file,
 	 * and return detected clones along with baseline completion status.
-	 * Fails open if worker is unavailable.
+	 *
+	 * Unlike read-only checks, mutation failures propagate so the extension can tell
+	 * the user that duplicate detection did not run.
 	 */
 	async checkAndUpdate(
 		filePath: string,
@@ -407,9 +409,9 @@ export class DuplicateDetectorCoordinator extends EventEmitter<CoordinatorEvents
 				isComplete: boolean;
 			}>("checkAndUpdate", payload);
 		} catch (err) {
-			// Fail open
-			this.emit("error", err instanceof Error ? err : new Error(String(err)));
-			return { clones: [], isComplete: false };
+			const error = err instanceof Error ? err : new Error(String(err));
+			this.emit("error", error);
+			throw error;
 		}
 	}
 

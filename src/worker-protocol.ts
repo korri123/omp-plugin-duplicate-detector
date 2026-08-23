@@ -174,6 +174,7 @@ export interface WorkerCompletePayload {
 	cloneCount: number;
 	durationMs: number;
 	status?: BaselineStatus;
+	error?: string;
 }
 
 export interface WorkerCompleteEvent {

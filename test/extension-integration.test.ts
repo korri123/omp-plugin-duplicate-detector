@@ -139,7 +139,7 @@ function createMockHarness(): MockHarness {
 					(m) => m.msg.customType === "duplicate-detector-status",
 				) || uiNotifications.length > 0,
 			2000,
-		).catch(() => {});
+		);
 		return ctx;
 	};
 

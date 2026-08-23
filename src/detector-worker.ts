@@ -277,13 +277,20 @@ async function runBaselineIndexing(
 	} catch (err) {
 		if (signal.aborted) return { indexedCount, status: "cancelled" };
 		isBaselineIndexing = false;
+		isBaselineComplete = false;
+		const error = err instanceof Error ? err.message : String(err);
+		self.postMessage(createStatusEvent("error", error));
 		self.postMessage(
-			createStatusEvent(
-				"error",
-				err instanceof Error ? err.message : String(err),
-			),
+			createCompleteEvent({
+				indexedCount,
+				totalSourceBytes,
+				cloneCount: currentIndex.clones.length,
+				durationMs: Date.now() - startTime,
+				status: "failed",
+				error,
+			}),
 		);
-		return { indexedCount, status: "complete" };
+		return { indexedCount, status: "failed" };
 	}
 }
 

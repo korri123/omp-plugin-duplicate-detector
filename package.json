@@ -3,6 +3,14 @@
 	"version": "0.1.0",
 	"description": "Code clone and duplication detector plugin for oh-my-pi powered by jscpd",
 	"type": "module",
+	"files": [
+		"src",
+		"dist",
+		"commands",
+		"skills",
+		"types",
+		"README.md"
+	],
 	"omp": {
 		"name": "duplicate-detector",
 		"description": "Detect duplicate and clone code blocks across your codebase powered by jscpd",
@@ -43,12 +51,13 @@
 		}
 	},
 	"scripts": {
+		"build:worker": "bun build ./src/detector-worker.ts --target=bun --outfile=./dist/detector-worker.js",
 		"test": "bun test ./test",
 		"typecheck": "tsc --noEmit -p tsconfig.json",
 		"format": "biome format --write .",
 		"lint": "biome lint .",
 		"check": "biome check --write .",
-		"prepare": "husky"
+		"prepare": "bun run build:worker"
 	},
 	"keywords": [
 		"oh-my-pi",

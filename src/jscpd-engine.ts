@@ -27,6 +27,7 @@ export type BaselineStatus =
 	| "skipped_not_git"
 	| "capped_file_count"
 	| "capped_source_bytes"
+	| "failed"
 	| "cancelled";
 
 /** Maximum file size in bytes to tokenize (100 KiB matches jscpd defaults) */
