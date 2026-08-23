@@ -26,6 +26,7 @@ export interface DuplicateNotificationData {
 export interface DuplicateStatusData {
 	status?: string;
 	count?: number;
+	cachedCount?: number;
 	content?: string;
 }
 export interface ThemeColors {

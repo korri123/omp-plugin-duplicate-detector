@@ -1,20 +1,21 @@
 /**
  * Persistent disk cache for pre-tokenized source shards.
  * Provides atomic writes, fail-open error handling, config-aware workspace keying,
- * and byte-budgeted LRU cache pruning.
+ * high-density binary compression, and byte-budgeted LRU cache pruning.
  */
 
 import * as crypto from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import * as zlib from "node:zlib";
 import type {
 	SerializedSourceShard,
 	SourceAwareIndexOptions,
 } from "./source-aware-index";
 import type { WorkspaceOptions } from "./worker-protocol";
 
-export const DEFAULT_MAX_CACHE_BYTES = 100 * 1024 * 1024; // 100 MB
+export const DEFAULT_MAX_CACHE_BYTES = 250 * 1024 * 1024; // 250 MB
 
 export interface DiskCacheOptions {
 	/** Root directory of the workspace */
@@ -23,7 +24,7 @@ export interface DiskCacheOptions {
 	cacheDir?: string;
 	/** Detector configuration used to compute configuration fingerprint */
 	config?: WorkspaceOptions | SourceAwareIndexOptions;
-	/** Maximum cache size in bytes before pruning (default: 100 MB) */
+	/** Maximum cache size in bytes before pruning (default: 250 MB) */
 	maxBytes?: number;
 }
 
@@ -117,6 +118,212 @@ export function computeShardKey(
 }
 
 /**
+ * Encodes a SerializedSourceShard into a high-density, zlib-compressed binary buffer.
+ */
+export function packBinaryShard(shard: SerializedSourceShard): Buffer {
+	const srcIdBuf = Buffer.from(shard.sourceId, "utf8");
+	const formatBuf = Buffer.from(shard.format, "utf8");
+	const hashBuf = Buffer.from(shard.contentHash, "utf8");
+
+	let framesPayloadLen = 0;
+	const frameCount = shard.frames ? shard.frames.length : 0;
+	const frameIdBufs = new Array<Buffer>(frameCount);
+	for (let i = 0; i < frameCount; i++) {
+		const idBuf = Buffer.from(shard.frames[i]!.id, "utf8");
+		frameIdBufs[i] = idBuf;
+		framesPayloadLen += 1 + idBuf.length + 32; // 1b idLen + idBuf + 8 * 4b coords
+	}
+
+	const headerLen =
+		4 + // magic 'DUP2'
+		2 + // version (2)
+		2 +
+		formatBuf.length +
+		2 +
+		hashBuf.length +
+		4 + // size
+		4 + // lines
+		4 + // tokenCount
+		8 + // updatedAt
+		2 +
+		srcIdBuf.length +
+		4; // frameCount
+
+	const buf = Buffer.allocUnsafe(headerLen + framesPayloadLen);
+
+	let pos = 0;
+	buf.write("DUP2", pos, 4, "ascii");
+	pos += 4;
+	buf.writeUInt16LE(2, pos);
+	pos += 2;
+
+	buf.writeUInt16LE(formatBuf.length, pos);
+	pos += 2;
+	formatBuf.copy(buf, pos);
+	pos += formatBuf.length;
+
+	buf.writeUInt16LE(hashBuf.length, pos);
+	pos += 2;
+	hashBuf.copy(buf, pos);
+	pos += hashBuf.length;
+
+	buf.writeUInt32LE(shard.size, pos);
+	pos += 4;
+	buf.writeUInt32LE(shard.lines, pos);
+	pos += 4;
+	buf.writeUInt32LE(shard.tokenCount, pos);
+	pos += 4;
+	buf.writeDoubleLE(shard.updatedAt ?? Date.now(), pos);
+	pos += 8;
+
+	buf.writeUInt16LE(srcIdBuf.length, pos);
+	pos += 2;
+	srcIdBuf.copy(buf, pos);
+	pos += srcIdBuf.length;
+
+	buf.writeUInt32LE(frameCount, pos);
+	pos += 4;
+
+	for (let i = 0; i < frameCount; i++) {
+		const f = shard.frames[i]!;
+		const idBuf = frameIdBufs[i]!;
+		buf.writeUInt8(idBuf.length, pos);
+		pos += 1;
+		idBuf.copy(buf, pos);
+		pos += idBuf.length;
+
+		buf.writeInt32LE(f.start.loc?.start.line ?? f.start.line ?? 1, pos);
+		pos += 4;
+		buf.writeInt32LE(f.start.loc?.start.column ?? f.start.column ?? 1, pos);
+		pos += 4;
+		buf.writeInt32LE(f.start.loc?.start.position ?? f.start.position ?? 0, pos);
+		pos += 4;
+		buf.writeInt32LE(f.start.range ? f.start.range[0] : 0, pos);
+		pos += 4;
+		buf.writeInt32LE(f.end.loc?.end.line ?? f.end.line ?? 1, pos);
+		pos += 4;
+		buf.writeInt32LE(f.end.loc?.end.column ?? f.end.column ?? 1, pos);
+		pos += 4;
+		buf.writeInt32LE(f.end.loc?.end.position ?? f.end.position ?? 0, pos);
+		pos += 4;
+		buf.writeInt32LE(f.end.range ? f.end.range[1] : 0, pos);
+		pos += 4;
+	}
+
+	return zlib.deflateRawSync(buf);
+}
+
+/**
+ * Decodes a zlib-compressed binary buffer into a SerializedSourceShard.
+ * Returns null if invalid or corrupted.
+ */
+export function unpackBinaryShard(
+	compressed: Buffer,
+): SerializedSourceShard | null {
+	try {
+		const buf = zlib.inflateRawSync(compressed);
+		let pos = 0;
+		if (buf.length < 4) return null;
+		const magic = buf.toString("ascii", 0, 4);
+		pos += 4;
+		if (magic !== "DUP2") return null;
+		const version = buf.readUInt16LE(pos);
+		pos += 2;
+		if (version !== 2) return null;
+
+		const formatLen = buf.readUInt16LE(pos);
+		pos += 2;
+		const format = buf.toString("utf8", pos, pos + formatLen);
+		pos += formatLen;
+
+		const hashLen = buf.readUInt16LE(pos);
+		pos += 2;
+		const contentHash = buf.toString("utf8", pos, pos + hashLen);
+		pos += hashLen;
+
+		const size = buf.readUInt32LE(pos);
+		pos += 4;
+		const lines = buf.readUInt32LE(pos);
+		pos += 4;
+		const tokenCount = buf.readUInt32LE(pos);
+		pos += 4;
+		const updatedAt = buf.readDoubleLE(pos);
+		pos += 8;
+
+		const srcLen = buf.readUInt16LE(pos);
+		pos += 2;
+		const sourceId = buf.toString("utf8", pos, pos + srcLen);
+		pos += srcLen;
+
+		const frameCount = buf.readUInt32LE(pos);
+		pos += 4;
+		const frames = new Array(frameCount);
+
+		for (let i = 0; i < frameCount; i++) {
+			const idLen = buf.readUInt8(pos);
+			pos += 1;
+			const id = buf.toString("utf8", pos, pos + idLen);
+			pos += idLen;
+			const startLine = buf.readInt32LE(pos);
+			pos += 4;
+			const startCol = buf.readInt32LE(pos);
+			pos += 4;
+			const startPos = buf.readInt32LE(pos);
+			pos += 4;
+			const startRange0 = buf.readInt32LE(pos);
+			pos += 4;
+			const endLine = buf.readInt32LE(pos);
+			pos += 4;
+			const endCol = buf.readInt32LE(pos);
+			pos += 4;
+			const endPos = buf.readInt32LE(pos);
+			pos += 4;
+			const endRange1 = buf.readInt32LE(pos);
+			pos += 4;
+
+			frames[i] = {
+				id,
+				sourceId,
+				start: {
+					line: startLine,
+					column: startCol,
+					position: startPos,
+					range: [startRange0, startRange0],
+					loc: {
+						start: { line: startLine, column: startCol, position: startPos },
+						end: { line: startLine, column: startCol, position: startPos },
+					},
+				},
+				end: {
+					line: endLine,
+					column: endCol,
+					position: endPos,
+					range: [endRange1, endRange1],
+					loc: {
+						start: { line: endLine, column: endCol, position: endPos },
+						end: { line: endLine, column: endCol, position: endPos },
+					},
+				},
+			};
+		}
+
+		return {
+			version: 1,
+			sourceId,
+			contentHash,
+			format,
+			size,
+			lines,
+			tokenCount,
+			updatedAt,
+			frames,
+		};
+	} catch {
+		return null;
+	}
+}
+
+/**
  * Manages persistent on-disk serialization, hydration, and lifecycle of tokenized source shards.
  */
 export class DiskCacheManager {
@@ -125,6 +332,7 @@ export class DiskCacheManager {
 	readonly workspaceCacheDir: string;
 	readonly configFingerprint: string;
 	readonly maxBytes: number;
+	#dirCreated = false;
 
 	constructor(options: DiskCacheOptions) {
 		this.rootDir = path.resolve(options.rootDir);
@@ -138,6 +346,13 @@ export class DiskCacheManager {
 			this.configFingerprint,
 		);
 		this.maxBytes = options.maxBytes ?? DEFAULT_MAX_CACHE_BYTES;
+	}
+
+	async #ensureCacheDir(): Promise<void> {
+		if (!this.#dirCreated) {
+			await fs.mkdir(this.workspaceCacheDir, { recursive: true });
+			this.#dirCreated = true;
+		}
 	}
 
 	/**
@@ -154,27 +369,48 @@ export class DiskCacheManager {
 				contentHash,
 				this.configFingerprint,
 			);
-			const shardPath = path.join(this.workspaceCacheDir, `${shardKey}.json`);
+			const binPath = path.join(this.workspaceCacheDir, `${shardKey}.bin`);
 
-			const raw = await fs.readFile(shardPath, "utf8");
-			const shard = JSON.parse(raw) as SerializedSourceShard;
+			// 1. Check compact compressed binary shard first
+			try {
+				const rawBin = await fs.readFile(binPath);
+				const shard = unpackBinaryShard(rawBin);
+				if (
+					shard &&
+					shard.contentHash === contentHash &&
+					typeof shard.sourceId === "string" &&
+					Array.isArray(shard.frames)
+				) {
+					fs.utimes(binPath, new Date(), new Date()).catch(() => {});
+					return shard;
+				}
+			} catch {}
 
-			// Validate shard structure and content hash
-			if (
-				!shard ||
-				typeof shard !== "object" ||
-				shard.version !== 1 ||
-				shard.contentHash !== contentHash ||
-				typeof shard.sourceId !== "string" ||
-				!Array.isArray(shard.frames)
-			) {
-				return null;
-			}
+			// 2. Fall back to legacy .json shard
+			const jsonPath = path.join(this.workspaceCacheDir, `${shardKey}.json`);
+			try {
+				const rawJson = await fs.readFile(jsonPath, "utf8");
+				const shard = JSON.parse(rawJson) as SerializedSourceShard;
 
-			// Touch file for LRU ordering
-			fs.utimes(shardPath, new Date(), new Date()).catch(() => {});
+				if (
+					shard &&
+					typeof shard === "object" &&
+					shard.version === 1 &&
+					shard.contentHash === contentHash &&
+					typeof shard.sourceId === "string" &&
+					Array.isArray(shard.frames)
+				) {
+					// Migrate on the fly to compact binary format and remove bloated legacy json
+					this.saveShard(shard, relPath)
+						.then(() => {
+							fs.unlink(jsonPath).catch(() => {});
+						})
+						.catch(() => {});
+					return shard;
+				}
+			} catch {}
 
-			return shard;
+			return null;
 		} catch {
 			// Fail open on missing file, JSON syntax errors, permission issues
 			return null;
@@ -203,17 +439,21 @@ export class DiskCacheManager {
 				this.configFingerprint,
 			);
 
-			await fs.mkdir(this.workspaceCacheDir, { recursive: true });
+			await this.#ensureCacheDir();
 
-			const targetPath = path.join(this.workspaceCacheDir, `${shardKey}.json`);
+			const targetPath = path.join(this.workspaceCacheDir, `${shardKey}.bin`);
 			tempPath = path.join(
 				this.workspaceCacheDir,
 				`.${shardKey}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`,
 			);
 
-			const payload = JSON.stringify(shard);
-			await fs.writeFile(tempPath, payload, "utf8");
+			const payload = packBinaryShard(shard);
+			await fs.writeFile(tempPath, payload);
 			await fs.rename(tempPath, targetPath);
+			// Clean up any legacy uncompressed json file for this shard
+			fs.unlink(path.join(this.workspaceCacheDir, `${shardKey}.json`)).catch(
+				() => {},
+			);
 		} catch {
 			if (tempPath) {
 				await fs.unlink(tempPath).catch(() => {});
@@ -264,13 +504,14 @@ export class DiskCacheManager {
 				recursive: true,
 				force: true,
 			});
+			this.#dirCreated = false;
 		} catch {
 			// Fail open
 		}
 	}
 
 	/**
-	 * Recursively collects all shard files (.json) and deletes stale temp files (.tmp).
+	 * Recursively collects all shard files (.bin, .json) and deletes stale temp files (.tmp).
 	 */
 	async #collectCacheFiles(
 		dir: string,
@@ -292,7 +533,7 @@ export class DiskCacheManager {
 					const subResults = await this.#collectCacheFiles(fullPath);
 					results.push(...subResults);
 				} else if (dirent.isFile()) {
-					if (dirent.name.endsWith(".json")) {
+					if (dirent.name.endsWith(".bin") || dirent.name.endsWith(".json")) {
 						try {
 							const stat = await fs.stat(fullPath);
 							results.push({

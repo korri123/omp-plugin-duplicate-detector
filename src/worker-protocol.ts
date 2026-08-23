@@ -170,6 +170,7 @@ export interface WorkerProgressEvent {
 
 export interface WorkerCompletePayload {
 	indexedCount: number;
+	cachedCount?: number;
 	totalSourceBytes: number;
 	cloneCount: number;
 	durationMs: number;

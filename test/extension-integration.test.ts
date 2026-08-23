@@ -634,7 +634,7 @@ export function calculateShippingQuote(weight: number, distance: number, express
 		}
 	});
 
-	it("notifies user with indexed file count when starting in a Git repository", async () => {
+	it("notifies user with indexed file count and cache state when starting in a Git repository", async () => {
 		await Bun.write(path.join(tempDir, "file1.ts"), "export const a = 1;\n");
 		await Bun.write(path.join(tempDir, "file2.ts"), "export const b = 2;\n");
 		await gitTrack(tempDir);
@@ -644,7 +644,7 @@ export function calculateShippingQuote(weight: number, distance: number, express
 		await harness.startSession(tempDir);
 
 		const readyNotification = harness.uiNotifications.find((n) =>
-			n.message.includes("Ready (2 Git files indexed)"),
+			n.message.includes("Ready (2 Git files indexed, uncached)"),
 		);
 		expect(readyNotification).toBeDefined();
 		expect(readyNotification?.type).toBe("info");
@@ -654,7 +654,39 @@ export function calculateShippingQuote(weight: number, distance: number, express
 			(m) => m.msg.customType === "duplicate-detector-status",
 		);
 		expect(statusMsg).toBeDefined();
-		expect(statusMsg?.msg.content).toContain("Ready (2 Git files indexed)");
+		expect(statusMsg?.msg.content).toContain(
+			"Ready (2 Git files indexed, uncached)",
+		);
 		expect(statusMsg?.opts?.triggerTurn).toBe(false);
+	});
+
+	it("indicates cached status on subsequent session startup in the same repository", async () => {
+		await Bun.write(path.join(tempDir, "file1.ts"), "export const a = 1;\n");
+		await Bun.write(path.join(tempDir, "file2.ts"), "export const b = 2;\n");
+		await gitTrack(tempDir);
+
+		// First session populates disk cache
+		const harness1 = createMockHarness();
+		duplicateDetectorExtension(harness1.api);
+		await harness1.startSession(tempDir);
+
+		// Second session hydrates shards from disk cache
+		const harness2 = createMockHarness();
+		duplicateDetectorExtension(harness2.api);
+		await harness2.startSession(tempDir);
+
+		const readyNotification = harness2.uiNotifications.find((n) =>
+			n.message.includes("Ready (2 Git files indexed, cached)"),
+		);
+		expect(readyNotification).toBeDefined();
+		expect(readyNotification?.type).toBe("info");
+
+		const statusMsg = harness2.sentMessages.find(
+			(m) => m.msg.customType === "duplicate-detector-status",
+		);
+		expect(statusMsg).toBeDefined();
+		expect(statusMsg?.msg.content).toContain(
+			"Ready (2 Git files indexed, cached)",
+		);
 	});
 });

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { formatBaselineMessage } from "../src/index";
 import {
 	DuplicateNotificationComponent,
 	DuplicateStatusComponent,
@@ -246,6 +247,77 @@ const c = 3;
 		expect(lines.length).toBe(1);
 		expect(lines[0]).toContain(
 			"[!] Duplicate detector: Ready (2,500 files indexed, capped at 2,500 file limit)",
+		);
+	});
+});
+
+describe("formatBaselineMessage: Cache State Formatting", () => {
+	it("formats complete status when all files are cached", () => {
+		expect(formatBaselineMessage("complete", 28, 28)).toBe(
+			"Duplicate detector: Ready (28 Git files indexed, cached)",
+		);
+	});
+
+	it("formats complete status when no files are cached (uncached)", () => {
+		expect(formatBaselineMessage("complete", 28, 0)).toBe(
+			"Duplicate detector: Ready (28 Git files indexed, uncached)",
+		);
+	});
+
+	it("formats complete status with partial cache hits", () => {
+		expect(formatBaselineMessage("complete", 28, 14)).toBe(
+			"Duplicate detector: Ready (28 Git files indexed, 14 cached)",
+		);
+	});
+
+	it("handles singular Git file with cached status", () => {
+		expect(formatBaselineMessage("complete", 1, 1)).toBe(
+			"Duplicate detector: Ready (1 Git file indexed, cached)",
+		);
+	});
+
+	it("handles singular Git file with uncached status", () => {
+		expect(formatBaselineMessage("complete", 1, 0)).toBe(
+			"Duplicate detector: Ready (1 Git file indexed, uncached)",
+		);
+	});
+
+	it("handles 0 files indexed without cache label", () => {
+		expect(formatBaselineMessage("complete", 0, 0)).toBe(
+			"Duplicate detector: Ready (0 Git files indexed)",
+		);
+	});
+
+	it("handles complete status when cachedCount is undefined", () => {
+		expect(formatBaselineMessage("complete", 42)).toBe(
+			"Duplicate detector: Ready (42 Git files indexed)",
+		);
+	});
+
+	it("formats capped_file_count with cache detail", () => {
+		expect(formatBaselineMessage("capped_file_count", 2500, 2500)).toBe(
+			"Duplicate detector: Ready (2,500 files indexed, cached, capped at 2,500 file limit)",
+		);
+		expect(formatBaselineMessage("capped_file_count", 2500, 0)).toBe(
+			"Duplicate detector: Ready (2,500 files indexed, uncached, capped at 2,500 file limit)",
+		);
+		expect(formatBaselineMessage("capped_file_count", 2500, 1000)).toBe(
+			"Duplicate detector: Ready (2,500 files indexed, 1,000 cached, capped at 2,500 file limit)",
+		);
+	});
+
+	it("formats capped_source_bytes with cache detail", () => {
+		expect(formatBaselineMessage("capped_source_bytes", 1200, 1200)).toBe(
+			"Duplicate detector: Ready (1,200 files indexed, cached, capped at 64 MB limit)",
+		);
+		expect(formatBaselineMessage("capped_source_bytes", 1200, 0)).toBe(
+			"Duplicate detector: Ready (1,200 files indexed, uncached, capped at 64 MB limit)",
+		);
+	});
+
+	it("formats skipped_not_git status without cache label", () => {
+		expect(formatBaselineMessage("skipped_not_git", 0, 0)).toBe(
+			"Duplicate detector: Baseline skipped (not a Git repository; mutation checks active)",
 		);
 	});
 });

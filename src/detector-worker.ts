@@ -8,6 +8,7 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { IClone } from "@jscpd/core";
+import { getFormatByFile } from "@jscpd/tokenizer";
 import { DiskCacheManager } from "./disk-cache";
 import {
 	type BaselineStatus,
@@ -20,7 +21,10 @@ import {
 	MAX_INDEXED_FILES,
 	MAX_TOTAL_SOURCE_BYTES,
 } from "./jscpd-engine";
-import { SourceAwareCloneIndex } from "./source-aware-index";
+import {
+	type SerializedSourceShard,
+	SourceAwareCloneIndex,
+} from "./source-aware-index";
 import {
 	createCompleteEvent,
 	createErrorResponse,
@@ -46,7 +50,7 @@ declare const self: {
 
 let currentIndex: SourceAwareCloneIndex = new SourceAwareCloneIndex();
 let currentDiskCache: DiskCacheManager | null = null;
-let currentRootDir: string = "";
+let currentRootDir = "";
 let currentOptions: WorkspaceOptions | undefined;
 let activeAbortController: AbortController | null = null;
 let isBaselineIndexing = false;
@@ -55,6 +59,9 @@ const watchedRevisions = new Map<
 	string,
 	{ revision: number; lastKnownCloneCount: number }
 >();
+
+const BATCH_SIZE = 32;
+
 function areOptionsEqual(a?: WorkspaceOptions, b?: WorkspaceOptions): boolean {
 	if (a === b) return true;
 	if (!a && !b) return true;
@@ -71,6 +78,41 @@ function areOptionsEqual(a?: WorkspaceOptions, b?: WorkspaceOptions): boolean {
 	const bFormats = b.formatsExts ? JSON.stringify(b.formatsExts) : "";
 	return aFormats === bFormats;
 }
+
+function notifyLateFindings(clones: IClone[]): void {
+	for (const clone of clones) {
+		const srcA = clone.duplicationA.sourceId;
+		const srcB = clone.duplicationB.sourceId;
+		const resA = path.resolve(srcA);
+		const resB = path.resolve(srcB);
+
+		const isWatchedA = watchedRevisions.has(srcA) || watchedRevisions.has(resA);
+		const isWatchedB = watchedRevisions.has(srcB) || watchedRevisions.has(resB);
+
+		if (isWatchedA || isWatchedB) {
+			if (isWatchedA) {
+				const entry = watchedRevisions.get(srcA) ?? watchedRevisions.get(resA);
+				if (entry) entry.lastKnownCloneCount++;
+			}
+			if (isWatchedB) {
+				const entry = watchedRevisions.get(srcB) ?? watchedRevisions.get(resB);
+				if (entry) entry.lastKnownCloneCount++;
+			}
+			self.postMessage(createLateFindingEvent(clone));
+		}
+	}
+}
+
+function cacheSourceShard(filePath: string, content: string): void {
+	if (!currentDiskCache) return;
+	const contentHash = crypto.createHash("sha256").update(content).digest("hex");
+	const relPath = path.relative(currentRootDir, filePath).replace(/\\/g, "/");
+	const shard = currentIndex.exportSourceShard(filePath, contentHash);
+	if (shard) {
+		currentDiskCache.saveShard(shard, relPath).catch(() => {});
+	}
+}
+
 // ============================================================================
 // Baseline Indexing Worker Task
 // ============================================================================
@@ -81,6 +123,16 @@ function yieldTask(): Promise<void> {
 	return promise;
 }
 
+interface BatchItem {
+	filePath: string;
+	content: string | null;
+	contentHash: string | null;
+	relPath: string | null;
+	size: number;
+	cachedShard: SerializedSourceShard | null;
+	alreadyIndexed: boolean;
+}
+
 async function runBaselineIndexing(
 	rootDir: string,
 	options: WorkspaceOptions | undefined,
@@ -88,6 +140,7 @@ async function runBaselineIndexing(
 ): Promise<{ indexedCount: number; status: BaselineStatus }> {
 	const startTime = Date.now();
 	let indexedCount = 0;
+	let cachedCount = 0;
 	let totalSourceBytes = 0;
 
 	try {
@@ -103,6 +156,7 @@ async function runBaselineIndexing(
 			self.postMessage(
 				createCompleteEvent({
 					indexedCount: 0,
+					cachedCount: 0,
 					totalSourceBytes: 0,
 					cloneCount: 0,
 					durationMs: Date.now() - startTime,
@@ -138,7 +192,7 @@ async function runBaselineIndexing(
 			| "capped_file_count"
 			| "capped_source_bytes" = "complete";
 
-		for (let i = 0; i < trackedFiles.length; i++) {
+		for (let i = 0; i < trackedFiles.length; i += BATCH_SIZE) {
 			if (signal.aborted) return { indexedCount, status: "cancelled" };
 
 			if (indexedCount >= MAX_INDEXED_FILES) {
@@ -155,103 +209,126 @@ async function runBaselineIndexing(
 				);
 				break;
 			}
-			const filePath = trackedFiles[i]!;
 
-			try {
-				const stat = await fs.stat(filePath);
-				if (stat.size > MAX_FILE_SIZE_BYTES || stat.size <= 0) {
-					continue;
-				}
+			const batch = trackedFiles.slice(i, i + BATCH_SIZE);
 
-				const content = await fs.readFile(filePath, "utf8");
-				if (signal.aborted) return { indexedCount, status: "cancelled" };
+			// Process file batch I/O and cache lookups concurrently
+			const fileItems = await Promise.all(
+				batch.map(async (filePath): Promise<BatchItem | null> => {
+					if (signal.aborted) return null;
 
-				if (isGeneratedContent(content)) {
-					continue;
-				}
+					// Early skip if file format is unsupported by tokenizer
+					if (!getFormatByFile(filePath, options?.formatsExts)) {
+						return null;
+					}
 
-				const resolved = path.resolve(filePath);
-				if (
-					!currentIndex.hasSource(filePath) &&
-					!currentIndex.hasSource(resolved)
-				) {
-					const contentHash = crypto
-						.createHash("sha256")
-						.update(content)
-						.digest("hex");
-					const relPath = path.relative(rootDir, filePath).replace(/\\/g, "/");
+					try {
+						const stat = await fs.stat(filePath);
+						if (stat.size > MAX_FILE_SIZE_BYTES || stat.size <= 0) {
+							return null;
+						}
 
-					let newClones: IClone[] = [];
-					const cachedShard = currentDiskCache
-						? await currentDiskCache.getShard(relPath, contentHash)
-						: null;
-
-					if (cachedShard) {
-						cachedShard.sourceId = filePath;
-						newClones = currentIndex.hydrateSourceShard(cachedShard);
-					} else {
-						newClones = currentIndex.addSource(filePath, content);
-						if (currentDiskCache) {
-							const shard = currentIndex.exportSourceShard(
+						const resolved = path.resolve(filePath);
+						if (
+							currentIndex.hasSource(filePath) ||
+							currentIndex.hasSource(resolved)
+						) {
+							return {
 								filePath,
-								contentHash,
-							);
-							if (shard) {
-								currentDiskCache.saveShard(shard, relPath).catch(() => {});
-							}
+								content: null,
+								contentHash: null,
+								relPath: null,
+								size: stat.size,
+								cachedShard: null,
+								alreadyIndexed: true,
+							};
 						}
-					}
 
-					indexedCount++;
-					totalSourceBytes += stat.size;
-					for (const clone of newClones) {
-						const srcA = clone.duplicationA.sourceId;
-						const srcB = clone.duplicationB.sourceId;
-						const resA = path.resolve(srcA);
-						const resB = path.resolve(srcB);
-
-						const isWatchedA =
-							watchedRevisions.has(srcA) || watchedRevisions.has(resA);
-						const isWatchedB =
-							watchedRevisions.has(srcB) || watchedRevisions.has(resB);
-
-						if (isWatchedA || isWatchedB) {
-							if (isWatchedA) {
-								const entry =
-									watchedRevisions.get(srcA) ?? watchedRevisions.get(resA);
-								if (entry) entry.lastKnownCloneCount++;
-							}
-							if (isWatchedB) {
-								const entry =
-									watchedRevisions.get(srcB) ?? watchedRevisions.get(resB);
-								if (entry) entry.lastKnownCloneCount++;
-							}
-							self.postMessage(createLateFindingEvent(clone));
+						const content = await fs.readFile(filePath, "utf8");
+						if (signal.aborted || isGeneratedContent(content)) {
+							return null;
 						}
+
+						const contentHash = crypto
+							.createHash("sha256")
+							.update(content)
+							.digest("hex");
+						const relPath = path
+							.relative(rootDir, filePath)
+							.replace(/\\/g, "/");
+
+						const cachedShard = currentDiskCache
+							? await currentDiskCache.getShard(relPath, contentHash)
+							: null;
+
+						return {
+							filePath,
+							content,
+							contentHash,
+							relPath,
+							size: stat.size,
+							cachedShard,
+							alreadyIndexed: false,
+						};
+					} catch {
+						return null;
 					}
-				} else {
+				}),
+			);
+
+			if (signal.aborted) return { indexedCount, status: "cancelled" };
+
+			// Ingest items into index and notify late findings
+			for (const item of fileItems) {
+				if (!item) continue;
+
+				if (item.alreadyIndexed) {
 					indexedCount++;
-					totalSourceBytes += stat.size;
+					totalSourceBytes += item.size;
+					continue;
 				}
-			} catch {
-				// Non-fatal: ignore unreadable/deleted files during baseline scan
+
+				let newClones: IClone[] = [];
+
+				if (item.cachedShard) {
+					item.cachedShard.sourceId = item.filePath;
+					newClones = currentIndex.hydrateSourceShard(item.cachedShard);
+					cachedCount++;
+				} else if (item.content) {
+					newClones = currentIndex.addSource(item.filePath, item.content);
+					if (currentDiskCache && item.contentHash && item.relPath) {
+						const shard = currentIndex.exportSourceShard(
+							item.filePath,
+							item.contentHash,
+						);
+						if (shard) {
+							currentDiskCache.saveShard(shard, item.relPath).catch(() => {});
+						}
+					}
+				}
+
+				indexedCount++;
+				totalSourceBytes += item.size;
+
+				if (newClones.length > 0) {
+					notifyLateFindings(newClones);
+				}
 			}
 
-			if (i % 2 === 0 || i === trackedFiles.length - 1) {
-				const percentage =
-					totalFiles > 0 ? Math.round(((i + 1) / totalFiles) * 100) : 100;
-				self.postMessage(
-					createProgressEvent({
-						phase: "indexing",
-						indexedCount,
-						totalFiles,
-						currentFile: filePath,
-						percentage,
-					}),
-				);
-			}
+			const processedCount = Math.min(i + batch.length, totalFiles);
+			const percentage =
+				totalFiles > 0 ? Math.round((processedCount / totalFiles) * 100) : 100;
+			self.postMessage(
+				createProgressEvent({
+					phase: "indexing",
+					indexedCount,
+					totalFiles,
+					currentFile: batch[batch.length - 1],
+					percentage,
+				}),
+			);
 
-			// Yield macrotask every 1-2 files to process pending RPCs
+			// Yield macrotask once per batch to process pending RPC requests
 			await yieldTask();
 		}
 
@@ -262,6 +339,7 @@ async function runBaselineIndexing(
 			self.postMessage(
 				createCompleteEvent({
 					indexedCount,
+					cachedCount,
 					totalSourceBytes,
 					cloneCount: currentIndex.clones.length,
 					durationMs: Date.now() - startTime,
@@ -283,6 +361,7 @@ async function runBaselineIndexing(
 		self.postMessage(
 			createCompleteEvent({
 				indexedCount,
+				cachedCount,
 				totalSourceBytes,
 				cloneCount: currentIndex.clones.length,
 				durationMs: Date.now() - startTime,
@@ -360,6 +439,10 @@ async function runIncrementalGitReconciliation(
 				currentIndex.removeSource(relPath);
 			} else {
 				try {
+					if (!getFormatByFile(fullPath, options?.formatsExts)) {
+						currentIndex.removeSource(fullPath);
+						continue;
+					}
 					const stat = await fs.stat(fullPath);
 					if (stat.size > MAX_FILE_SIZE_BYTES || stat.size <= 0) {
 						currentIndex.removeSource(fullPath);
@@ -378,30 +461,9 @@ async function runIncrementalGitReconciliation(
 					}
 
 					const newClones = currentIndex.updateSource(fullPath, content);
-					for (const clone of newClones) {
-						const srcA = clone.duplicationA.sourceId;
-						const srcB = clone.duplicationB.sourceId;
-						const resA = path.resolve(srcA);
-						const resB = path.resolve(srcB);
-
-						const isWatchedA =
-							watchedRevisions.has(srcA) || watchedRevisions.has(resA);
-						const isWatchedB =
-							watchedRevisions.has(srcB) || watchedRevisions.has(resB);
-
-						if (isWatchedA || isWatchedB) {
-							if (isWatchedA) {
-								const entry =
-									watchedRevisions.get(srcA) ?? watchedRevisions.get(resA);
-								if (entry) entry.lastKnownCloneCount++;
-							}
-							if (isWatchedB) {
-								const entry =
-									watchedRevisions.get(srcB) ?? watchedRevisions.get(resB);
-								if (entry) entry.lastKnownCloneCount++;
-							}
-							self.postMessage(createLateFindingEvent(clone));
-						}
+					cacheSourceShard(fullPath, content);
+					if (newClones.length > 0) {
+						notifyLateFindings(newClones);
 					}
 				} catch {
 					currentIndex.removeSource(fullPath);
@@ -530,6 +592,8 @@ async function handleWorkerRequest(msg: WorkerRequestMessage): Promise<void> {
 			const clones = currentIndex.updateSource(filePath, content, format);
 			const resolvedPath = path.resolve(filePath);
 
+			cacheSourceShard(filePath, content);
+
 			const fileClones = clones.filter(
 				(c) =>
 					c.duplicationA.sourceId === filePath ||
@@ -557,6 +621,7 @@ async function handleWorkerRequest(msg: WorkerRequestMessage): Promise<void> {
 		case "updateFile": {
 			const { filePath, content, format } = msg.payload;
 			const clones = currentIndex.updateSource(filePath, content, format);
+			cacheSourceShard(filePath, content);
 			self.postMessage(createSuccessResponse(msg.id, { clones }));
 			break;
 		}
@@ -576,13 +641,21 @@ async function handleWorkerRequest(msg: WorkerRequestMessage): Promise<void> {
 				try {
 					if (fileEntry.content !== undefined) {
 						currentIndex.updateSource(fileEntry.filePath, fileEntry.content);
+						cacheSourceShard(fileEntry.filePath, fileEntry.content);
 						reconciledCount++;
 					} else {
+						if (
+							!getFormatByFile(fileEntry.filePath, currentOptions?.formatsExts)
+						) {
+							currentIndex.removeSource(fileEntry.filePath);
+							continue;
+						}
 						const stat = await fs.stat(fileEntry.filePath);
 						if (stat.size <= MAX_FILE_SIZE_BYTES && stat.size > 0) {
 							const content = await fs.readFile(fileEntry.filePath, "utf8");
 							if (!isGeneratedContent(content)) {
 								currentIndex.updateSource(fileEntry.filePath, content);
+								cacheSourceShard(fileEntry.filePath, content);
 								reconciledCount++;
 							}
 						}
@@ -624,6 +697,7 @@ async function handleWorkerRequest(msg: WorkerRequestMessage): Promise<void> {
 
 					for (const file of filesToScan) {
 						try {
+							if (!getFormatByFile(file, optionsToUse?.formatsExts)) continue;
 							const stat = await fs.stat(file);
 							if (stat.size <= MAX_FILE_SIZE_BYTES && stat.size > 0) {
 								const content = await fs.readFile(file, "utf8");

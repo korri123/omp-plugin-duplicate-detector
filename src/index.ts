@@ -235,6 +235,45 @@ function extractSettingsObject(
 	return undefined;
 }
 
+export function formatBaselineMessage(
+	status: BaselineStatus,
+	count: number,
+	cachedCount?: number,
+): string {
+	if (status === "skipped_not_git") {
+		return "Duplicate detector: Baseline skipped (not a Git repository; mutation checks active)";
+	}
+
+	const fileWord = count === 1 ? "file" : "files";
+	const formattedCount = count.toLocaleString();
+
+	let cacheDetail = "";
+	if (cachedCount !== undefined && count > 0) {
+		if (cachedCount === count) {
+			cacheDetail = ", cached";
+		} else if (cachedCount === 0) {
+			cacheDetail = ", uncached";
+		} else {
+			cacheDetail = `, ${cachedCount.toLocaleString()} cached`;
+		}
+	}
+
+	if (status === "complete") {
+		const gitLabel = count === 1 ? "Git file" : "Git files";
+		return `Duplicate detector: Ready (${formattedCount} ${gitLabel} indexed${cacheDetail})`;
+	}
+
+	if (status === "capped_file_count") {
+		return `Duplicate detector: Ready (${formattedCount} ${fileWord} indexed${cacheDetail}, capped at 2,500 file limit)`;
+	}
+
+	if (status === "capped_source_bytes") {
+		return `Duplicate detector: Ready (${formattedCount} ${fileWord} indexed${cacheDetail}, capped at 64 MB limit)`;
+	}
+
+	return "";
+}
+
 function notifyBaselineStatus(
 	pi: ExtensionAPI,
 	ctx:
@@ -246,26 +285,15 @@ function notifyBaselineStatus(
 		| undefined,
 	status: BaselineStatus,
 	count: number,
+	cachedCount?: number,
 ): void {
-	let message = "";
-	let level: "info" | "warning" = "info";
-
-	if (status === "complete") {
-		message = `Duplicate detector: Ready (${count} Git file${count === 1 ? "" : "s"} indexed)`;
-		level = "info";
-	} else if (status === "skipped_not_git") {
-		message =
-			"Duplicate detector: Baseline skipped (not a Git repository; mutation checks active)";
-		level = "info";
-	} else if (status === "capped_file_count") {
-		message = `Duplicate detector: Ready (${count} files indexed, capped at 2,500 file limit)`;
-		level = "warning";
-	} else if (status === "capped_source_bytes") {
-		message = `Duplicate detector: Ready (${count} files indexed, capped at 64 MB limit)`;
-		level = "warning";
-	}
-
+	const message = formatBaselineMessage(status, count, cachedCount);
 	if (!message) return;
+
+	const level: "info" | "warning" =
+		status === "capped_file_count" || status === "capped_source_bytes"
+			? "warning"
+			: "info";
 
 	// 1. Send transient TUI toast if UI is active
 	ctx?.ui?.notify?.(message, level);
@@ -280,6 +308,7 @@ function notifyBaselineStatus(
 			details: {
 				status,
 				count,
+				cachedCount,
 				content: message,
 			},
 		},
@@ -341,7 +370,13 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 			return;
 		}
 		workerFailureNotified = false;
-		notifyBaselineStatus(pi, lastCtx, status, payload.indexedCount);
+		notifyBaselineStatus(
+			pi,
+			lastCtx,
+			status,
+			payload.indexedCount,
+			payload.cachedCount,
+		);
 	});
 
 	coordinator.on("status", (payload) => {

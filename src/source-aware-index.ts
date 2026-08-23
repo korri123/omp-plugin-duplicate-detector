@@ -262,9 +262,10 @@ export class SourceAwareCloneIndex {
 		}
 
 		const hashes = new Set<string>();
-		const normalizedFrames = frames.map((f) =>
-			f.sourceId === sourceId ? f : { ...f, sourceId },
-		);
+		const normalizedFrames =
+			frames.length === 0 || frames[0]?.sourceId === sourceId
+				? frames
+				: frames.map((f) => (f.sourceId === sourceId ? f : { ...f, sourceId }));
 
 		const newClones = this.#detectClonesFromFrames(
 			normalizedFrames,

@@ -456,7 +456,7 @@ export function formatCurrency(amount: number, currency = "USD"): string {
 				);
 				const shardPath = path.join(
 					cacheManager.workspaceCacheDir,
-					`${shardKey}.json`,
+					`${shardKey}.bin`,
 				);
 				const pastDate = new Date(now - (3 - i) * 60_000);
 				await fs.utimes(shardPath, pastDate, pastDate);
@@ -470,7 +470,7 @@ export function formatCurrency(amount: number, currency = "USD"): string {
 			);
 			const shardPath0 = path.join(
 				cacheManager.workspaceCacheDir,
-				`${shardKey0}.json`,
+				`${shardKey0}.bin`,
 			);
 			const stat0 = await fs.stat(shardPath0);
 
@@ -481,7 +481,7 @@ export function formatCurrency(amount: number, currency = "USD"): string {
 			);
 			const shardPath2 = path.join(
 				cacheManager.workspaceCacheDir,
-				`${shardKey2}.json`,
+				`${shardKey2}.bin`,
 			);
 			const stat2 = await fs.stat(shardPath2);
 
@@ -559,6 +559,114 @@ export function formatCurrency(amount: number, currency = "USD"): string {
 				.then(() => true)
 				.catch(() => false);
 			expect(exists).toBe(false);
+		});
+	});
+
+	describe("High-Density Binary Shard Packing & Legacy Fallback", () => {
+		it("round-trips binary shard serialization with accurate frame coordinates", async () => {
+			const cacheManager = new DiskCacheManager({
+				rootDir: workspaceDir,
+				cacheDir: cacheBaseDir,
+			});
+
+			const index = new SourceAwareCloneIndex({ minTokens: 10, minLines: 3 });
+			const relPath = "src/roundtrip.ts";
+			const fullPath = path.join(workspaceDir, relPath);
+			const hash = crypto
+				.createHash("sha256")
+				.update(sampleCodeA)
+				.digest("hex");
+
+			index.addSource(fullPath, sampleCodeA);
+			const shard = index.exportSourceShard(fullPath, hash)!;
+
+			await cacheManager.saveShard(shard, relPath);
+			const retrieved = await cacheManager.getShard(relPath, hash);
+
+			expect(retrieved).not.toBeNull();
+			expect(retrieved?.version).toBe(1);
+			expect(retrieved?.sourceId).toBe(fullPath);
+			expect(retrieved?.contentHash).toBe(hash);
+			const retFrames = retrieved?.frames ?? [];
+			expect(retFrames.length).toBe(shard.frames.length);
+
+			for (let i = 0; i < shard.frames.length; i++) {
+				expect(retFrames[i]?.id).toBe(shard.frames[i]!.id);
+				expect(retFrames[i]?.start.line).toBe(
+					shard.frames[i]!.start.loc?.start.line ?? shard.frames[i]!.start.line,
+				);
+				expect(retFrames[i]?.end.line).toBe(
+					shard.frames[i]!.end.loc?.end.line ?? shard.frames[i]!.end.line,
+				);
+			}
+		});
+
+		it("seamlessly loads legacy v1 JSON shards when binary shard is not yet present", async () => {
+			const cacheManager = new DiskCacheManager({
+				rootDir: workspaceDir,
+				cacheDir: cacheBaseDir,
+			});
+
+			const relPath = "src/legacy.ts";
+			const fullPath = path.join(workspaceDir, relPath);
+			const contentHash = "legacy_hash_12345";
+			const shardKey = computeShardKey(
+				relPath,
+				contentHash,
+				cacheManager.configFingerprint,
+			);
+
+			await fs.mkdir(cacheManager.workspaceCacheDir, { recursive: true });
+			const legacyJsonPath = path.join(
+				cacheManager.workspaceCacheDir,
+				`${shardKey}.json`,
+			);
+
+			const legacyShard: SerializedSourceShard = {
+				version: 1,
+				sourceId: fullPath,
+				contentHash,
+				format: "typescript",
+				size: 100,
+				lines: 10,
+				tokenCount: 50,
+				frames: [
+					{
+						id: "hash_001",
+						sourceId: fullPath,
+						start: {
+							line: 1,
+							column: 1,
+							position: 0,
+							range: [0, 5],
+							type: "keyword",
+							value: "const",
+							length: 5,
+							format: "typescript",
+						},
+						end: {
+							line: 5,
+							column: 10,
+							position: 80,
+							range: [80, 90],
+							type: "default",
+							value: "value",
+							length: 5,
+							format: "typescript",
+						},
+					},
+				],
+			};
+
+			await fs.writeFile(legacyJsonPath, JSON.stringify(legacyShard), "utf8");
+
+			const retrieved = await cacheManager.getShard(relPath, contentHash);
+			expect(retrieved).not.toBeNull();
+			expect(retrieved?.sourceId).toBe(fullPath);
+			expect(retrieved?.contentHash).toBe(contentHash);
+			const frames = retrieved?.frames ?? [];
+			expect(frames.length).toBe(1);
+			expect(frames[0]?.id).toBe("hash_001");
 		});
 	});
 });
