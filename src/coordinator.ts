@@ -78,10 +78,8 @@ function computeConfigHash(
 }
 export function resolveDefaultWorkerUrl(): string {
 	try {
-		if (import.meta.url.endsWith(".ts")) {
-			return new URL("./detector-worker.ts", import.meta.url).href;
-		}
-		return new URL("./detector-worker.js", import.meta.url).href;
+		const distFromSrc = new URL("../dist/detector-worker.js", import.meta.url);
+		return distFromSrc.href;
 	} catch {
 		return new URL("../dist/detector-worker.js", import.meta.url).href;
 	}
