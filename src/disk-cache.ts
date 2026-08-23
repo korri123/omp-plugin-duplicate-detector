@@ -4,7 +4,9 @@
  * high-density binary compression, and byte-budgeted LRU cache pruning.
  */
 
+import { Database, type Statement } from "bun:sqlite";
 import * as crypto from "node:crypto";
+import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -16,6 +18,7 @@ import {
 	type SourceAwareIndexOptions,
 	type SourceFrame,
 } from "./source-aware-index";
+import type { WorkspaceOptions } from "./worker-protocol";
 
 export const DEFAULT_MAX_CACHE_BYTES = 250 * 1024 * 1024; // 250 MB
 
@@ -88,9 +91,9 @@ export function computeConfigFingerprint(
 }
 
 /**
- * Computes the workspace cache directory keyed by canonical workspace path and config fingerprint.
+ * Computes the workspace SQLite cache database path keyed by canonical workspace path and config fingerprint.
  */
-export function computeWorkspaceCacheDir(
+export function computeWorkspaceCachePath(
 	baseDir: string,
 	rootDir: string,
 	configFingerprint: string,
@@ -101,7 +104,18 @@ export function computeWorkspaceCacheDir(
 		.update(canonicalPath)
 		.digest("hex")
 		.slice(0, 16);
-	return path.join(baseDir, `${workspaceHash}_${configFingerprint}`);
+	return path.join(baseDir, `${workspaceHash}_${configFingerprint}.sqlite`);
+}
+
+/**
+ * Computes the workspace cache directory or database path keyed by canonical workspace path and config fingerprint.
+ */
+export function computeWorkspaceCacheDir(
+	baseDir: string,
+	rootDir: string,
+	configFingerprint: string,
+): string {
+	return computeWorkspaceCachePath(baseDir, rootDir, configFingerprint);
 }
 
 /**
@@ -594,15 +608,25 @@ function unpackBinaryShardV2(buf: Buffer): SerializedSourceShard | null {
 }
 
 /**
- * Manages persistent on-disk serialization, hydration, and lifecycle of tokenized source shards.
+ * Manages persistent SQLite database caching, hydration, and lifecycle of tokenized source shards.
  */
 export class DiskCacheManager {
 	readonly rootDir: string;
 	readonly baseCacheDir: string;
+	readonly dbPath: string;
 	readonly workspaceCacheDir: string;
 	readonly configFingerprint: string;
 	readonly maxBytes: number;
-	#dirCreated = false;
+
+	#db: Database | null = null;
+	#getStmt: Statement | null = null;
+	#saveStmt: Statement | null = null;
+	#updateMtimeStmt: Statement | null = null;
+	#deleteStmt: Statement | null = null;
+	#totalSizeStmt: Statement | null = null;
+	#oldestShardsStmt: Statement | null = null;
+	#deleteAllStmt: Statement | null = null;
+	#closed = false;
 
 	constructor(options: DiskCacheOptions) {
 		this.rootDir = path.resolve(options.rootDir);
@@ -610,23 +634,74 @@ export class DiskCacheManager {
 			? path.resolve(options.cacheDir)
 			: getDefaultCacheDir();
 		this.configFingerprint = computeConfigFingerprint(options.config);
-		this.workspaceCacheDir = computeWorkspaceCacheDir(
+		this.dbPath = computeWorkspaceCachePath(
 			this.baseCacheDir,
 			this.rootDir,
 			this.configFingerprint,
 		);
+		this.workspaceCacheDir = this.baseCacheDir;
 		this.maxBytes = options.maxBytes ?? DEFAULT_MAX_CACHE_BYTES;
 	}
 
-	async #ensureCacheDir(): Promise<void> {
-		if (!this.#dirCreated) {
-			await fs.mkdir(this.workspaceCacheDir, { recursive: true });
-			this.#dirCreated = true;
+	#getDb(): Database | null {
+		if (this.#closed) return null;
+		if (this.#db) return this.#db;
+
+		try {
+			const dir = path.dirname(this.dbPath);
+			if (!fsSync.existsSync(dir)) {
+				fsSync.mkdirSync(dir, { recursive: true });
+			}
+
+			const db = new Database(this.dbPath, { create: true });
+			db.exec("PRAGMA journal_mode = WAL;");
+			db.exec("PRAGMA synchronous = NORMAL;");
+			db.exec("PRAGMA temp_store = MEMORY;");
+
+			db.exec(`
+				CREATE TABLE IF NOT EXISTS shards (
+					rel_path TEXT NOT NULL PRIMARY KEY,
+					content_hash TEXT NOT NULL,
+					payload BLOB NOT NULL,
+					mtime REAL NOT NULL
+				);
+				CREATE INDEX IF NOT EXISTS idx_shards_content_hash ON shards(content_hash);
+				CREATE INDEX IF NOT EXISTS idx_shards_mtime ON shards(mtime);
+			`);
+
+			this.#getStmt = db.prepare(
+				"SELECT payload, content_hash FROM shards WHERE rel_path = ?1",
+			);
+			this.#saveStmt = db.prepare(`
+				INSERT INTO shards (rel_path, content_hash, payload, mtime)
+				VALUES (?1, ?2, ?3, ?4)
+				ON CONFLICT(rel_path) DO UPDATE SET
+					content_hash = excluded.content_hash,
+					payload = excluded.payload,
+					mtime = excluded.mtime
+			`);
+			this.#updateMtimeStmt = db.prepare(
+				"UPDATE shards SET mtime = ?1 WHERE rel_path = ?2",
+			);
+			this.#deleteStmt = db.prepare("DELETE FROM shards WHERE rel_path = ?1");
+			this.#totalSizeStmt = db.prepare(
+				"SELECT COALESCE(SUM(LENGTH(payload)), 0) as total FROM shards",
+			);
+			this.#oldestShardsStmt = db.prepare(
+				"SELECT rel_path, LENGTH(payload) as size FROM shards ORDER BY mtime ASC",
+			);
+			this.#deleteAllStmt = db.prepare("DELETE FROM shards");
+
+			this.#db = db;
+			return db;
+		} catch {
+			// Fail open on SQLite creation or permission errors
+			return null;
 		}
 	}
 
 	/**
-	 * Retrieves a serialized shard from disk if present and valid.
+	 * Retrieves a serialized shard from the SQLite cache if present and valid.
 	 * Returns null on cache miss or corrupted/invalid shard (fails open).
 	 */
 	async getShard(
@@ -634,229 +709,189 @@ export class DiskCacheManager {
 		contentHash: string,
 	): Promise<SerializedSourceShard | null> {
 		try {
-			const shardKey = computeShardKey(
-				relPath,
-				contentHash,
-				this.configFingerprint,
-			);
-			const binPath = path.join(this.workspaceCacheDir, `${shardKey}.bin`);
+			const db = this.#getDb();
+			if (!db || !this.#getStmt) return null;
 
-			// 1. Check compact compressed binary shard first
-			try {
-				const rawBin = await fs.readFile(binPath);
-				const shard = unpackBinaryShard(rawBin);
-				if (
-					shard &&
-					shard.contentHash === contentHash &&
-					typeof shard.sourceId === "string" &&
-					Array.isArray(shard.frames)
-				) {
-					fs.utimes(binPath, new Date(), new Date()).catch(() => {});
-					return shard;
+			const normalizedRelPath = relPath.replace(/\\/g, "/");
+			const row = this.#getStmt.get(normalizedRelPath) as
+				| {
+						payload: Uint8Array | Buffer;
+						content_hash: string;
+				  }
+				| null
+				| undefined;
+
+			if (!row || row.content_hash !== contentHash) {
+				return null;
+			}
+
+			const payloadBuf = Buffer.isBuffer(row.payload)
+				? row.payload
+				: Buffer.from(
+						row.payload.buffer,
+						row.payload.byteOffset,
+						row.payload.byteLength,
+					);
+
+			const shard = unpackBinaryShard(payloadBuf);
+			if (
+				shard &&
+				shard.contentHash === contentHash &&
+				typeof shard.sourceId === "string" &&
+				Array.isArray(shard.frames)
+			) {
+				try {
+					this.#updateMtimeStmt?.run(Date.now(), normalizedRelPath);
+				} catch {
+					// Non-fatal
 				}
-			} catch {}
-
-			// 2. Fall back to legacy .json shard
-			const jsonPath = path.join(this.workspaceCacheDir, `${shardKey}.json`);
-			try {
-				const rawJson = await fs.readFile(jsonPath, "utf8");
-				const shard = JSON.parse(rawJson) as SerializedSourceShard;
-
-				if (
-					shard &&
-					typeof shard === "object" &&
-					shard.version === 1 &&
-					shard.contentHash === contentHash &&
-					typeof shard.sourceId === "string" &&
-					Array.isArray(shard.frames)
-				) {
-					// Migrate on the fly to compact binary format and remove bloated legacy json
-					this.saveShard(shard, relPath)
-						.then(() => {
-							fs.unlink(jsonPath).catch(() => {});
-						})
-						.catch(() => {});
-					return shard;
-				}
-			} catch {}
+				return shard;
+			}
 
 			return null;
 		} catch {
-			// Fail open on missing file, JSON syntax errors, permission issues
+			// Fail open on any error
 			return null;
 		}
 	}
 
 	/**
-	 * Atomically saves a pre-tokenized shard to disk cache via temp file + rename.
+	 * Atomically saves a pre-tokenized shard to SQLite cache table.
 	 * Fails open without throwing on I/O errors.
 	 */
 	async saveShard(
 		shard: SerializedSourceShard,
 		relPath?: string,
 	): Promise<void> {
-		let tempPath: string | null = null;
 		try {
+			const db = this.#getDb();
+			if (!db || !this.#saveStmt) return;
+
 			const targetRelPath =
 				relPath ??
 				(path.isAbsolute(shard.sourceId)
 					? path.relative(this.rootDir, shard.sourceId)
 					: shard.sourceId);
 
-			const shardKey = computeShardKey(
-				targetRelPath,
-				shard.contentHash,
-				this.configFingerprint,
-			);
-
-			await this.#ensureCacheDir();
-
-			const targetPath = path.join(this.workspaceCacheDir, `${shardKey}.bin`);
-			tempPath = path.join(
-				this.workspaceCacheDir,
-				`.${shardKey}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`,
-			);
-
+			const normalizedRelPath = targetRelPath.replace(/\\/g, "/");
 			const payload = packBinaryShard(shard);
-			await fs.writeFile(tempPath, payload);
-			await fs.rename(tempPath, targetPath);
-			// Clean up any legacy uncompressed json file for this shard
-			fs.unlink(path.join(this.workspaceCacheDir, `${shardKey}.json`)).catch(
-				() => {},
+
+			this.#saveStmt.run(
+				normalizedRelPath,
+				shard.contentHash,
+				payload,
+				Date.now(),
 			);
 		} catch {
-			if (tempPath) {
-				await fs.unlink(tempPath).catch(() => {});
-			}
 			// Fail open: cache write failures should not disrupt indexing
 		}
 	}
 
 	/**
-	 * Prunes the oldest shard files across the cache if total size exceeds budget.
+	 * Prunes the oldest shards in the SQLite cache if total payload size exceeds budget.
 	 */
 	async prune(maxBytes?: number): Promise<void> {
 		const budget = maxBytes !== undefined ? maxBytes : this.maxBytes;
 
 		try {
-			const entries = await this.#collectCacheFiles(this.baseCacheDir);
-			let totalSize = entries.reduce((acc, e) => acc + e.size, 0);
-			if (totalSize <= budget) {
-				await this.#cleanEmptyDirs(this.baseCacheDir);
+			const db = this.#getDb();
+			if (!db) return;
+
+			if (budget <= 0) {
+				this.#deleteAllStmt?.run();
+				try {
+					db.exec("VACUUM;");
+				} catch {
+					// Ignore vacuum errors
+				}
 				return;
 			}
 
-			// Sort by oldest access/modification time first
-			entries.sort((a, b) => a.mtime - b.mtime);
+			const totalRow = this.#totalSizeStmt?.get() as
+				| { total: number }
+				| null
+				| undefined;
+			let totalSize = totalRow?.total ?? 0;
 
-			for (const entry of entries) {
+			if (totalSize <= budget) {
+				return;
+			}
+
+			const oldestShards = (this.#oldestShardsStmt?.all() ?? []) as Array<{
+				rel_path: string;
+				size: number;
+			}>;
+
+			let deletedAny = false;
+			for (const entry of oldestShards) {
 				if (totalSize <= budget) {
 					break;
 				}
 				try {
-					await fs.unlink(entry.filePath);
+					this.#deleteStmt?.run(entry.rel_path);
 					totalSize -= entry.size;
+					deletedAny = true;
 				} catch {
-					// Ignore individual file deletion errors
+					// Ignore individual deletion errors
 				}
 			}
 
-			await this.#cleanEmptyDirs(this.baseCacheDir);
+			if (deletedAny) {
+				try {
+					db.exec("VACUUM;");
+				} catch {
+					// Ignore vacuum errors
+				}
+			}
 		} catch {
 			// Fail open on pruning errors
 		}
 	}
 
 	/**
-	 * Clears all cached shards in the current workspace cache directory.
+	 * Clears all cached shards in the current workspace cache database.
 	 */
 	async clear(): Promise<void> {
 		try {
-			await fs.rm(this.workspaceCacheDir, {
-				recursive: true,
-				force: true,
-			});
-			this.#dirCreated = false;
+			if (this.#db) {
+				try {
+					this.#db.close();
+				} catch {}
+				this.#db = null;
+				this.#getStmt = null;
+				this.#saveStmt = null;
+				this.#updateMtimeStmt = null;
+				this.#deleteStmt = null;
+				this.#totalSizeStmt = null;
+				this.#oldestShardsStmt = null;
+				this.#deleteAllStmt = null;
+			}
+
+			await fs.unlink(this.dbPath).catch(() => {});
+			await fs.unlink(`${this.dbPath}-wal`).catch(() => {});
+			await fs.unlink(`${this.dbPath}-shm`).catch(() => {});
 		} catch {
 			// Fail open
 		}
 	}
 
 	/**
-	 * Recursively collects all shard files (.bin, .json) and deletes stale temp files (.tmp).
+	 * Safely closes the SQLite database connection.
 	 */
-	async #collectCacheFiles(
-		dir: string,
-	): Promise<Array<{ filePath: string; size: number; mtime: number }>> {
-		const results: Array<{
-			filePath: string;
-			size: number;
-			mtime: number;
-		}> = [];
-
-		try {
-			const dirents = await fs.readdir(dir, { withFileTypes: true });
-			const now = Date.now();
-
-			for (const dirent of dirents) {
-				const fullPath = path.join(dir, dirent.name);
-
-				if (dirent.isDirectory()) {
-					const subResults = await this.#collectCacheFiles(fullPath);
-					results.push(...subResults);
-				} else if (dirent.isFile()) {
-					if (dirent.name.endsWith(".bin") || dirent.name.endsWith(".json")) {
-						try {
-							const stat = await fs.stat(fullPath);
-							results.push({
-								filePath: fullPath,
-								size: stat.size,
-								mtime: stat.mtimeMs,
-							});
-						} catch {
-							// Ignore inaccessible files
-						}
-					} else if (
-						dirent.name.endsWith(".tmp") ||
-						dirent.name.startsWith(".")
-					) {
-						// Clean up stale temporary files older than 60 seconds
-						try {
-							const stat = await fs.stat(fullPath);
-							if (now - stat.mtimeMs > 60_000) {
-								await fs.unlink(fullPath).catch(() => {});
-							}
-						} catch {
-							// Ignore
-						}
-					}
-				}
-			}
-		} catch {
-			// Directory may not exist yet
-		}
-
-		return results;
-	}
-
-	/**
-	 * Recursively removes empty directories within the cache tree.
-	 */
-	async #cleanEmptyDirs(dir: string): Promise<void> {
-		try {
-			const dirents = await fs.readdir(dir, { withFileTypes: true });
-			for (const dirent of dirents) {
-				if (dirent.isDirectory()) {
-					const subPath = path.join(dir, dirent.name);
-					await this.#cleanEmptyDirs(subPath);
-				}
-			}
-			const remaining = await fs.readdir(dir);
-			if (remaining.length === 0 && dir !== this.baseCacheDir) {
-				await fs.rmdir(dir).catch(() => {});
-			}
-		} catch {
-			// Ignore
+	close(): void {
+		this.#closed = true;
+		if (this.#db) {
+			try {
+				this.#db.close();
+			} catch {}
+			this.#db = null;
+			this.#getStmt = null;
+			this.#saveStmt = null;
+			this.#updateMtimeStmt = null;
+			this.#deleteStmt = null;
+			this.#totalSizeStmt = null;
+			this.#oldestShardsStmt = null;
+			this.#deleteAllStmt = null;
 		}
 	}
 }

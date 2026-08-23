@@ -546,11 +546,15 @@ async function handleWorkerRequest(msg: WorkerRequestMessage): Promise<void> {
 				break;
 			}
 
-			// Abort any ongoing indexing from previous workspace
+			// Abort any ongoing indexing and close previous workspace cache
 			if (activeAbortController) {
 				activeAbortController.abort();
 			}
 			activeAbortController = new AbortController();
+			if (currentDiskCache) {
+				currentDiskCache.close();
+				currentDiskCache = null;
+			}
 
 			currentRootDir = rootDir;
 			currentOptions = options;
@@ -732,7 +736,10 @@ async function handleWorkerRequest(msg: WorkerRequestMessage): Promise<void> {
 				activeAbortController = null;
 			}
 			currentIndex.reset();
-			currentDiskCache = null;
+			if (currentDiskCache) {
+				currentDiskCache.close();
+				currentDiskCache = null;
+			}
 			watchedRevisions.clear();
 			isBaselineIndexing = false;
 			isBaselineComplete = false;

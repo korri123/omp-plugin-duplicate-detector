@@ -4,6 +4,7 @@
  * atomic writes, corrupted shard fail-open resilience, and LRU byte-budget pruning.
  */
 
+import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import * as crypto from "node:crypto";
 import * as fs from "node:fs/promises";
@@ -14,6 +15,7 @@ import {
 	computeConfigFingerprint,
 	computeShardKey,
 	computeWorkspaceCacheDir,
+	computeWorkspaceCachePath,
 	DiskCacheManager,
 	getDefaultCacheDir,
 	packBinaryShard,
@@ -114,17 +116,17 @@ export function formatCurrency(amount: number, currency = "USD"): string {
 		});
 
 		it("computes workspace directory isolated by root path and configuration", () => {
-			const wsDirA = computeWorkspaceCacheDir(
+			const wsDirA = computeWorkspaceCachePath(
 				cacheBaseDir,
 				"/path/to/projectA",
 				"fp123",
 			);
-			const wsDirB = computeWorkspaceCacheDir(
+			const wsDirB = computeWorkspaceCachePath(
 				cacheBaseDir,
 				"/path/to/projectB",
 				"fp123",
 			);
-			const wsDirDifferentConfig = computeWorkspaceCacheDir(
+			const wsDirDifferentConfig = computeWorkspaceCachePath(
 				cacheBaseDir,
 				"/path/to/projectA",
 				"fp456",
@@ -133,6 +135,7 @@ export function formatCurrency(amount: number, currency = "USD"): string {
 			expect(wsDirA).not.toBe(wsDirB);
 			expect(wsDirA).not.toBe(wsDirDifferentConfig);
 			expect(wsDirA.startsWith(cacheBaseDir)).toBe(true);
+			expect(wsDirA.endsWith(".sqlite")).toBe(true);
 		});
 
 		it("computes consistent shard key based on relative path, content hash, and config", () => {
@@ -294,8 +297,8 @@ export function formatCurrency(amount: number, currency = "USD"): string {
 		});
 	});
 
-	describe("DiskCacheManager: Atomic Writes & Fail-Open Resilience", () => {
-		it("atomically saves and retrieves shards from disk cache", async () => {
+	describe("DiskCacheManager: SQLite Storage, Atomic Writes & Fail-Open Resilience", () => {
+		it("atomically saves and retrieves shards from SQLite database in WAL mode", async () => {
 			const cacheManager = new DiskCacheManager({
 				rootDir: workspaceDir,
 				cacheDir: cacheBaseDir,
@@ -313,20 +316,36 @@ export function formatCurrency(amount: number, currency = "USD"): string {
 			index.addSource(fullPath, sampleCodeA);
 			const shard = index.exportSourceShard(fullPath, contentHash)!;
 
-			// Save to disk cache
+			// Save to SQLite disk cache
 			await cacheManager.saveShard(shard, relPath);
 
-			// Retrieve from disk cache
+			// Retrieve from SQLite disk cache
 			const retrieved = await cacheManager.getShard(relPath, contentHash);
 			expect(retrieved).not.toBeNull();
 			expect(retrieved?.sourceId).toBe(fullPath);
 			expect(retrieved?.contentHash).toBe(contentHash);
 			expect(retrieved?.frames.length).toBe(shard.frames.length);
 
-			// Verify no lingering .tmp files in workspace cache dir
-			const files = await fs.readdir(cacheManager.workspaceCacheDir);
-			const tmpFiles = files.filter((f) => f.endsWith(".tmp"));
-			expect(tmpFiles.length).toBe(0);
+			// Verify single SQLite file exists and zero .bin files created
+			const exists = await fs
+				.stat(cacheManager.dbPath)
+				.then(() => true)
+				.catch(() => false);
+			expect(exists).toBe(true);
+
+			const files = await fs.readdir(cacheBaseDir);
+			const binFiles = files.filter((f) => f.endsWith(".bin"));
+			expect(binFiles.length).toBe(0);
+
+			// Verify WAL journal mode
+			const db = new Database(cacheManager.dbPath);
+			const journalPragma = db.prepare("PRAGMA journal_mode;").get() as {
+				journal_mode: string;
+			};
+			expect(journalPragma.journal_mode).toBe("wal");
+			db.close();
+
+			cacheManager.close();
 		});
 
 		it("fails open and returns null for non-existent shard", async () => {
@@ -340,6 +359,7 @@ export function formatCurrency(amount: number, currency = "USD"): string {
 				"some-hash",
 			);
 			expect(result).toBeNull();
+			cacheManager.close();
 		});
 
 		it("fails open and returns null when content hash mismatches", async () => {
@@ -363,64 +383,42 @@ export function formatCurrency(amount: number, currency = "USD"): string {
 
 			const result = await cacheManager.getShard(relPath, "different-hash");
 			expect(result).toBeNull();
+			cacheManager.close();
 		});
 
-		it("fails open and returns null on corrupted JSON shard file", async () => {
+		it("fails open on corrupted or malformed database payload", async () => {
 			const cacheManager = new DiskCacheManager({
 				rootDir: workspaceDir,
 				cacheDir: cacheBaseDir,
 			});
 
-			const relPath = "src/corrupt.ts";
-			const contentHash = "abc123456";
-			const shardKey = computeShardKey(
-				relPath,
-				contentHash,
-				cacheManager.configFingerprint,
-			);
-
-			await fs.mkdir(cacheManager.workspaceCacheDir, { recursive: true });
-			const shardFile = path.join(
-				cacheManager.workspaceCacheDir,
-				`${shardKey}.json`,
-			);
-
-			// Write invalid/corrupted JSON
-			await fs.writeFile(shardFile, "{ invalid json data ...", "utf8");
-
-			const result = await cacheManager.getShard(relPath, contentHash);
-			expect(result).toBeNull();
-		});
-
-		it("fails open on malformed shard payload lacking required fields", async () => {
-			const cacheManager = new DiskCacheManager({
-				rootDir: workspaceDir,
-				cacheDir: cacheBaseDir,
+			// Prime the database
+			await cacheManager.saveShard({
+				version: 1,
+				sourceId: "src/dummy.ts",
+				contentHash: "dummy",
+				format: "typescript",
+				size: 10,
+				lines: 1,
+				tokenCount: 1,
+				frames: [],
 			});
 
-			const relPath = "src/malformed.ts";
-			const contentHash = "abc123456";
-			const shardKey = computeShardKey(
-				relPath,
-				contentHash,
-				cacheManager.configFingerprint,
+			// Inject corrupted binary payload directly into the shards table
+			const db = new Database(cacheManager.dbPath);
+			db.prepare(
+				"INSERT INTO shards (rel_path, content_hash, payload, mtime) VALUES (?1, ?2, ?3, ?4) ON CONFLICT(rel_path) DO UPDATE SET payload = excluded.payload",
+			).run(
+				"src/corrupt.ts",
+				"abc123456",
+				Buffer.from("invalid corrupted zlib binary stream data"),
+				Date.now(),
 			);
+			db.close();
 
-			await fs.mkdir(cacheManager.workspaceCacheDir, { recursive: true });
-			const shardFile = path.join(
-				cacheManager.workspaceCacheDir,
-				`${shardKey}.json`,
-			);
-
-			// Write JSON missing frames and version
-			await fs.writeFile(
-				shardFile,
-				JSON.stringify({ sourceId: relPath, contentHash }),
-				"utf8",
-			);
-
-			const result = await cacheManager.getShard(relPath, contentHash);
+			const result = await cacheManager.getShard("src/corrupt.ts", "abc123456");
 			expect(result).toBeNull();
+			cacheManager.close();
 		});
 	});
 
@@ -447,48 +445,46 @@ export function formatCurrency(amount: number, currency = "USD"): string {
 				await cacheManager.saveShard(shard, relPath);
 			}
 
-			// Adjust modification times: shard 0 is oldest, shard 2 is newest
-			const now = Date.now();
-			for (let i = 0; i < shards.length; i++) {
-				const relPath = `src/file_${i + 1}.ts`;
-				const shardKey = computeShardKey(
-					relPath,
-					shards[i]!.contentHash,
-					cacheManager.configFingerprint,
-				);
-				const shardPath = path.join(
-					cacheManager.workspaceCacheDir,
-					`${shardKey}.bin`,
-				);
-				const pastDate = new Date(now - (3 - i) * 60_000);
-				await fs.utimes(shardPath, pastDate, pastDate);
-			}
-
-			// Get sizes of individual shard files
-			const shardKey0 = computeShardKey(
+			// Adjust modification times in SQLite: shard 0 is oldest, shard 2 is newest
+			const db = new Database(cacheManager.dbPath);
+			db.prepare("UPDATE shards SET mtime = ?1 WHERE rel_path = ?2").run(
+				1000,
 				"src/file_1.ts",
-				shards[0]!.contentHash,
-				cacheManager.configFingerprint,
 			);
-			const shardPath0 = path.join(
-				cacheManager.workspaceCacheDir,
-				`${shardKey0}.bin`,
+			db.prepare("UPDATE shards SET mtime = ?1 WHERE rel_path = ?2").run(
+				2000,
+				"src/file_2.ts",
 			);
-			const stat0 = await fs.stat(shardPath0);
-
-			const shardKey2 = computeShardKey(
+			db.prepare("UPDATE shards SET mtime = ?1 WHERE rel_path = ?2").run(
+				3000,
 				"src/file_3.ts",
-				shards[2]!.contentHash,
-				cacheManager.configFingerprint,
 			);
-			const shardPath2 = path.join(
-				cacheManager.workspaceCacheDir,
-				`${shardKey2}.bin`,
-			);
-			const stat2 = await fs.stat(shardPath2);
 
-			// Prune with a budget that only fits the 2 newest files
-			const maxBudget = stat0.size + stat2.size + 10;
+			const size1 = (
+				db
+					.prepare(
+						"SELECT LENGTH(payload) as size FROM shards WHERE rel_path = 'src/file_1.ts'",
+					)
+					.get() as { size: number }
+			).size;
+			const size2 = (
+				db
+					.prepare(
+						"SELECT LENGTH(payload) as size FROM shards WHERE rel_path = 'src/file_2.ts'",
+					)
+					.get() as { size: number }
+			).size;
+			const size3 = (
+				db
+					.prepare(
+						"SELECT LENGTH(payload) as size FROM shards WHERE rel_path = 'src/file_3.ts'",
+					)
+					.get() as { size: number }
+			).size;
+			db.close();
+
+			// Prune with a budget that only fits the 2 newest files (file_2 and file_3)
+			const maxBudget = size2 + size3 + 10;
 			await cacheManager.prune(maxBudget);
 
 			// Oldest shard (file_1) should be evicted
@@ -504,6 +500,8 @@ export function formatCurrency(amount: number, currency = "USD"): string {
 				shards[2]!.contentHash,
 			);
 			expect(shard3Result).not.toBeNull();
+
+			cacheManager.close();
 		});
 
 		it("prunes all shards when maxBytes is 0", async () => {
@@ -534,9 +532,11 @@ export function formatCurrency(amount: number, currency = "USD"): string {
 			// Verify shard was deleted
 			const afterPrune = await cacheManager.getShard(relPath, contentHash);
 			expect(afterPrune).toBeNull();
+
+			cacheManager.close();
 		});
 
-		it("clears workspace directory cleanly with clear()", async () => {
+		it("clears workspace database cleanly with clear()", async () => {
 			const cacheManager = new DiskCacheManager({
 				rootDir: workspaceDir,
 				cacheDir: cacheBaseDir,
@@ -557,10 +557,12 @@ export function formatCurrency(amount: number, currency = "USD"): string {
 			await cacheManager.clear();
 
 			const exists = await fs
-				.stat(cacheManager.workspaceCacheDir)
+				.stat(cacheManager.dbPath)
 				.then(() => true)
 				.catch(() => false);
 			expect(exists).toBe(false);
+
+			cacheManager.close();
 		});
 	});
 
@@ -603,7 +605,7 @@ export function formatCurrency(amount: number, currency = "USD"): string {
 			}
 		});
 
-		it("unpacks legacy DUP2 binary frame shards seamlessly", async () => {
+		it("unpacks legacy DUP2 binary frame shards seamlessly from SQLite", async () => {
 			const cacheManager = new DiskCacheManager({
 				rootDir: workspaceDir,
 				cacheDir: cacheBaseDir,
@@ -612,17 +614,6 @@ export function formatCurrency(amount: number, currency = "USD"): string {
 			const relPath = "src/legacy-dup2.ts";
 			const fullPath = path.join(workspaceDir, relPath);
 			const contentHash = "legacy_dup2_hash_12345";
-			const shardKey = computeShardKey(
-				relPath,
-				contentHash,
-				cacheManager.configFingerprint,
-			);
-
-			await fs.mkdir(cacheManager.workspaceCacheDir, { recursive: true });
-			const binPath = path.join(
-				cacheManager.workspaceCacheDir,
-				`${shardKey}.bin`,
-			);
 
 			const legacyShard: SerializedSourceShard = {
 				version: 1,
@@ -660,9 +651,8 @@ export function formatCurrency(amount: number, currency = "USD"): string {
 				],
 			};
 
-			// Save using packBinaryShard without tokens (forces DUP2 packing)
-			const binaryPayload = packBinaryShard(legacyShard);
-			await fs.writeFile(binPath, binaryPayload);
+			// Save using saveShard without tokens (forces DUP2 packing into SQLite)
+			await cacheManager.saveShard(legacyShard, relPath);
 
 			const retrieved = await cacheManager.getShard(relPath, contentHash);
 			expect(retrieved).not.toBeNull();
@@ -671,6 +661,7 @@ export function formatCurrency(amount: number, currency = "USD"): string {
 			const frames = retrieved?.frames ?? [];
 			expect(frames.length).toBe(1);
 			expect(frames[0]?.id).toBe("hash_001_legacy_frame");
+			cacheManager.close();
 		});
 
 		it("demonstrates significant size reduction for DUP3 token format vs DUP2 frame format", () => {
@@ -695,96 +686,35 @@ export function formatCurrency(amount: number, currency = "USD"): string {
 			expect(dup3Packed.length).toBeLessThan(dup2Packed.length);
 		});
 
-		it("cleans up empty workspace directories during prune", async () => {
+		it("handles database close gracefully and fails open on subsequent calls", async () => {
 			const cacheManager = new DiskCacheManager({
 				rootDir: workspaceDir,
 				cacheDir: cacheBaseDir,
 			});
 
-			const emptySubDir = path.join(cacheBaseDir, "empty_workspace_dir_123");
-			await fs.mkdir(emptySubDir, { recursive: true });
-			expect(
-				await fs
-					.stat(emptySubDir)
-					.then(() => true)
-					.catch(() => false),
-			).toBe(true);
-
-			await cacheManager.prune(100 * 1024 * 1024);
-
-			const exists = await fs
-				.stat(emptySubDir)
-				.then(() => true)
-				.catch(() => false);
-			expect(exists).toBe(false);
-		});
-
-		it("seamlessly loads legacy v1 JSON shards when binary shard is not yet present", async () => {
-			const cacheManager = new DiskCacheManager({
-				rootDir: workspaceDir,
-				cacheDir: cacheBaseDir,
-			});
-
-			const relPath = "src/legacy.ts";
+			const relPath = "src/close-test.ts";
 			const fullPath = path.join(workspaceDir, relPath);
-			const contentHash = "legacy_hash_12345";
-			const shardKey = computeShardKey(
+			const contentHash = "close_hash_123";
+
+			await cacheManager.saveShard(
+				{
+					version: 1,
+					sourceId: fullPath,
+					contentHash,
+					format: "typescript",
+					size: 10,
+					lines: 1,
+					tokenCount: 1,
+					frames: [],
+				},
 				relPath,
-				contentHash,
-				cacheManager.configFingerprint,
 			);
 
-			await fs.mkdir(cacheManager.workspaceCacheDir, { recursive: true });
-			const legacyJsonPath = path.join(
-				cacheManager.workspaceCacheDir,
-				`${shardKey}.json`,
-			);
+			cacheManager.close();
 
-			const legacyShard: SerializedSourceShard = {
-				version: 1,
-				sourceId: fullPath,
-				contentHash,
-				format: "typescript",
-				size: 100,
-				lines: 10,
-				tokenCount: 50,
-				frames: [
-					{
-						id: "hash_001",
-						sourceId: fullPath,
-						start: {
-							line: 1,
-							column: 1,
-							position: 0,
-							range: [0, 5],
-							type: "keyword",
-							value: "const",
-							length: 5,
-							format: "typescript",
-						},
-						end: {
-							line: 5,
-							column: 10,
-							position: 80,
-							range: [80, 90],
-							type: "default",
-							value: "value",
-							length: 5,
-							format: "typescript",
-						},
-					},
-				],
-			};
-
-			await fs.writeFile(legacyJsonPath, JSON.stringify(legacyShard), "utf8");
-
+			// After close, operations fail open safely
 			const retrieved = await cacheManager.getShard(relPath, contentHash);
-			expect(retrieved).not.toBeNull();
-			expect(retrieved?.sourceId).toBe(fullPath);
-			expect(retrieved?.contentHash).toBe(contentHash);
-			const frames = retrieved?.frames ?? [];
-			expect(frames.length).toBe(1);
-			expect(frames[0]?.id).toBe("hash_001");
+			expect(retrieved).toBeNull();
 		});
 	});
 });
