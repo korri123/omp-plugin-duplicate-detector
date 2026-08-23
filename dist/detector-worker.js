@@ -11922,24 +11922,52 @@ var DEFAULT_NOISE_PATTERNS = [
   "node_modules"
 ];
 var DEFAULT_NON_CODE_FORMATS = new Set([
+  "abnf",
+  "apacheconf",
+  "arff",
+  "asciidoc",
+  "bnf",
+  "comments",
+  "csp",
+  "csv",
   "diff",
-  "markdown",
-  "txt",
+  "dns-zone-file",
+  "dot",
+  "ebnf",
+  "editorconfig",
+  "excel-formula",
+  "gedcom",
+  "gettext",
+  "git",
+  "hpkp",
+  "hsts",
+  "http",
+  "ignore",
+  "ini",
   "json",
   "json5",
-  "csv",
-  "log",
-  "excel-formula",
-  "ignore",
-  "git",
-  "asciidoc",
-  "textile",
-  "wiki",
-  "tap",
-  "gettext",
+  "keymap",
   "latex",
+  "log",
+  "markdown",
+  "mermaid",
+  "nginx",
   "plant-uml",
-  "mermaid"
+  "properties",
+  "regex",
+  "rest",
+  "roboconf",
+  "shell-session",
+  "sparql",
+  "tap",
+  "textile",
+  "toml",
+  "turtle",
+  "txt",
+  "uri",
+  "url",
+  "wiki",
+  "yaml"
 ]);
 function getSupportedCodeFormat(filePath, formatsExts) {
   const format = getFormatByFile(filePath, formatsExts);
@@ -11954,7 +11982,7 @@ function getSupportedCodeFormat(filePath, formatsExts) {
   }
   if (format === "markup") {
     const ext = path.extname(filePath).toLowerCase();
-    if (ext === ".svg" || ext === ".xml") {
+    if (ext === ".svg" || ext === ".xml" || ext === ".xsl" || ext === ".xslt") {
       return;
     }
   }

@@ -72,24 +72,52 @@ export const DEFAULT_NOISE_PATTERNS = [
  * Non-code data, documentation, and metadata formats excluded from default code duplicate analysis.
  */
 export const DEFAULT_NON_CODE_FORMATS: ReadonlySet<string> = new Set([
+	"abnf",
+	"apacheconf",
+	"arff",
+	"asciidoc",
+	"bnf",
+	"comments",
+	"csp",
+	"csv",
 	"diff",
-	"markdown",
-	"txt",
+	"dns-zone-file",
+	"dot",
+	"ebnf",
+	"editorconfig",
+	"excel-formula",
+	"gedcom",
+	"gettext",
+	"git",
+	"hpkp",
+	"hsts",
+	"http",
+	"ignore",
+	"ini",
 	"json",
 	"json5",
-	"csv",
-	"log",
-	"excel-formula",
-	"ignore",
-	"git",
-	"asciidoc",
-	"textile",
-	"wiki",
-	"tap",
-	"gettext",
+	"keymap",
 	"latex",
-	"plant-uml",
+	"log",
+	"markdown",
 	"mermaid",
+	"nginx",
+	"plant-uml",
+	"properties",
+	"regex",
+	"rest",
+	"roboconf",
+	"shell-session",
+	"sparql",
+	"tap",
+	"textile",
+	"toml",
+	"turtle",
+	"txt",
+	"uri",
+	"url",
+	"wiki",
+	"yaml",
 ]);
 
 /**
@@ -115,10 +143,10 @@ export function getSupportedCodeFormat(
 		return undefined;
 	}
 
-	// Filter out non-code markup data files (e.g. standalone .svg and .xml data files)
+	// Filter out non-code markup data files (e.g. standalone .svg, .xml, .xsl, and .xslt data files)
 	if (format === "markup") {
 		const ext = path.extname(filePath).toLowerCase();
-		if (ext === ".svg" || ext === ".xml") {
+		if (ext === ".svg" || ext === ".xml" || ext === ".xsl" || ext === ".xslt") {
 			return undefined;
 		}
 	}

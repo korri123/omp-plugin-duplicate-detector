@@ -531,7 +531,7 @@ describe("getSupportedCodeFormat", () => {
 		expect(getSupportedCodeFormat("script.sh")).toBe("bash");
 	});
 
-	it("filters out non-code documentation, data, logs, diffs, and graphic files by default", () => {
+	it("filters out non-code documentation, data, logs, diffs, configs, and graphic files by default", () => {
 		expect(getSupportedCodeFormat("changes.patch")).toBeUndefined();
 		expect(getSupportedCodeFormat("git.diff")).toBeUndefined();
 		expect(getSupportedCodeFormat("README.md")).toBeUndefined();
@@ -541,6 +541,18 @@ describe("getSupportedCodeFormat", () => {
 		expect(getSupportedCodeFormat("server.log")).toBeUndefined();
 		expect(getSupportedCodeFormat("notes.txt")).toBeUndefined();
 		expect(getSupportedCodeFormat("logo.svg")).toBeUndefined();
+		expect(getSupportedCodeFormat("feed.xml")).toBeUndefined();
+		expect(getSupportedCodeFormat("transform.xsl")).toBeUndefined();
+		expect(getSupportedCodeFormat("transform.xslt")).toBeUndefined();
+		expect(getSupportedCodeFormat("config.yaml")).toBeUndefined();
+		expect(getSupportedCodeFormat("ci.yml")).toBeUndefined();
+		expect(getSupportedCodeFormat("Cargo.toml")).toBeUndefined();
+		expect(getSupportedCodeFormat("settings.ini")).toBeUndefined();
+		expect(getSupportedCodeFormat("app.properties")).toBeUndefined();
+		expect(getSupportedCodeFormat("graph.dot")).toBeUndefined();
+		expect(getSupportedCodeFormat("graph.gv")).toBeUndefined();
+		expect(getSupportedCodeFormat("data.ttl")).toBeUndefined();
+		expect(getSupportedCodeFormat("query.rq")).toBeUndefined();
 		expect(getSupportedCodeFormat("document.latex")).toBeUndefined();
 	});
 
