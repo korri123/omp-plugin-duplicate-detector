@@ -317,10 +317,9 @@ export class DuplicateDetectorCoordinator extends EventEmitter<CoordinatorEvents
 	// ============================================================================
 	// Public API
 	// ============================================================================
-
 	/**
-	 * Open a workspace root directory and initiate non-blocking background indexing.
-	 * Returns immediately once the worker acknowledges receipt.
+	 * Open a workspace root directory and initiate non-blocking background indexing in the worker.
+	 * Returns immediately once the worker acknowledges start.
 	 */
 	async openWorkspace(
 		rootDir: string,

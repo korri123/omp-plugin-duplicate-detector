@@ -10,6 +10,7 @@ import * as path from "node:path";
 import type { IClone } from "@jscpd/core";
 import { DiskCacheManager } from "./disk-cache";
 import {
+	type BaselineStatus,
 	createIgnoreFilter,
 	execGit,
 	getTrackedGitFiles,
@@ -84,14 +85,14 @@ async function runBaselineIndexing(
 	rootDir: string,
 	options: WorkspaceOptions | undefined,
 	signal: AbortSignal,
-): Promise<void> {
+): Promise<{ indexedCount: number; status: BaselineStatus }> {
 	const startTime = Date.now();
 	let indexedCount = 0;
 	let totalSourceBytes = 0;
 
 	try {
 		const isGit = await isInsideGitWorkTree(rootDir, signal);
-		if (signal.aborted) return;
+		if (signal.aborted) return { indexedCount: 0, status: "cancelled" };
 
 		if (!isGit) {
 			isBaselineIndexing = false;
@@ -108,7 +109,7 @@ async function runBaselineIndexing(
 					status: "skipped_not_git",
 				}),
 			);
-			return;
+			return { indexedCount: 0, status: "skipped_not_git" };
 		}
 
 		self.postMessage(
@@ -120,7 +121,7 @@ async function runBaselineIndexing(
 			signal,
 		});
 
-		if (signal.aborted) return;
+		if (signal.aborted) return { indexedCount: 0, status: "cancelled" };
 
 		const totalFiles = trackedFiles.length;
 		self.postMessage(
@@ -138,7 +139,7 @@ async function runBaselineIndexing(
 			| "capped_source_bytes" = "complete";
 
 		for (let i = 0; i < trackedFiles.length; i++) {
-			if (signal.aborted) return;
+			if (signal.aborted) return { indexedCount, status: "cancelled" };
 
 			if (indexedCount >= MAX_INDEXED_FILES) {
 				baselineStatus = "capped_file_count";
@@ -163,7 +164,7 @@ async function runBaselineIndexing(
 				}
 
 				const content = await fs.readFile(filePath, "utf8");
-				if (signal.aborted) return;
+				if (signal.aborted) return { indexedCount, status: "cancelled" };
 
 				if (isGeneratedContent(content)) {
 					continue;
@@ -270,9 +271,11 @@ async function runBaselineIndexing(
 			self.postMessage(
 				createStatusEvent("ready", "Baseline indexing complete"),
 			);
+			return { indexedCount, status: baselineStatus };
 		}
+		return { indexedCount, status: "cancelled" };
 	} catch (err) {
-		if (signal.aborted) return;
+		if (signal.aborted) return { indexedCount, status: "cancelled" };
 		isBaselineIndexing = false;
 		self.postMessage(
 			createStatusEvent(
@@ -280,6 +283,7 @@ async function runBaselineIndexing(
 				err instanceof Error ? err.message : String(err),
 			),
 		);
+		return { indexedCount, status: "complete" };
 	}
 }
 
@@ -287,11 +291,15 @@ async function runIncrementalGitReconciliation(
 	rootDir: string,
 	options: WorkspaceOptions | undefined,
 	signal: AbortSignal,
-): Promise<void> {
+): Promise<{ indexedCount: number; status: BaselineStatus }> {
 	try {
 		const isGit = await isInsideGitWorkTree(rootDir, signal);
-		if (!isGit || signal.aborted) return;
-
+		if (!isGit || signal.aborted) {
+			return {
+				indexedCount: currentIndex.stats().sourceCount,
+				status: !isGit ? "skipped_not_git" : "complete",
+			};
+		}
 		const ignoreFilter = createIgnoreFilter(options?.ignorePatterns);
 
 		const { stdout } = await execGit(
@@ -300,12 +308,20 @@ async function runIncrementalGitReconciliation(
 			{ signal },
 		);
 
-		if (signal.aborted) return;
+		if (signal.aborted)
+			return {
+				indexedCount: currentIndex.stats().sourceCount,
+				status: "cancelled",
+			};
 
 		const entries = stdout.split("\0");
 		let i = 0;
 		while (i < entries.length) {
-			if (signal.aborted) return;
+			if (signal.aborted)
+				return {
+					indexedCount: currentIndex.stats().sourceCount,
+					status: "cancelled",
+				};
 			const entry = entries[i];
 			i++;
 			if (!entry || entry.length < 4) continue;
@@ -343,7 +359,11 @@ async function runIncrementalGitReconciliation(
 						continue;
 					}
 					const content = await fs.readFile(fullPath, "utf8");
-					if (signal.aborted) return;
+					if (signal.aborted)
+						return {
+							indexedCount: currentIndex.stats().sourceCount,
+							status: "cancelled",
+						};
 
 					if (isGeneratedContent(content)) {
 						currentIndex.removeSource(fullPath);
@@ -395,8 +415,16 @@ async function runIncrementalGitReconciliation(
 				}),
 			);
 		}
+		return {
+			indexedCount: currentIndex.stats().sourceCount,
+			status: "complete",
+		};
 	} catch {
 		// Non-fatal error during incremental reconciliation
+		return {
+			indexedCount: currentIndex.stats().sourceCount,
+			status: "complete",
+		};
 	}
 }
 
@@ -416,24 +444,35 @@ async function handleWorkerRequest(msg: WorkerRequestMessage): Promise<void> {
 				areOptionsEqual(currentOptions, options) &&
 				(isBaselineComplete || isBaselineIndexing)
 			) {
-				self.postMessage(
-					createSuccessResponse(msg.id, {
-						started: true,
-						rootDir,
-						reused: true,
-					}),
-				);
-
 				if (isBaselineComplete) {
 					if (activeAbortController) {
 						activeAbortController.abort();
 					}
 					activeAbortController = new AbortController();
-					runIncrementalGitReconciliation(
+					const recResult = await runIncrementalGitReconciliation(
 						rootDir,
 						options,
 						activeAbortController.signal,
-					).catch(() => {});
+					);
+					self.postMessage(
+						createSuccessResponse(msg.id, {
+							started: true,
+							rootDir,
+							reused: true,
+							indexedCount: recResult.indexedCount,
+							status: recResult.status,
+						}),
+					);
+				} else {
+					self.postMessage(
+						createSuccessResponse(msg.id, {
+							started: true,
+							rootDir,
+							reused: true,
+							indexedCount: currentIndex.stats().sourceCount,
+							status: "complete" as BaselineStatus,
+						}),
+					);
 				}
 				break;
 			}
@@ -456,7 +495,7 @@ async function handleWorkerRequest(msg: WorkerRequestMessage): Promise<void> {
 			watchedRevisions.clear();
 			isBaselineIndexing = true;
 			isBaselineComplete = false;
-			// Respond immediately to main thread: workspace open accepted
+
 			self.postMessage(
 				createSuccessResponse(msg.id, {
 					started: true,
@@ -465,7 +504,7 @@ async function handleWorkerRequest(msg: WorkerRequestMessage): Promise<void> {
 				}),
 			);
 
-			// Start background indexing task
+			// Run background indexing task (posts complete event when finished)
 			runBaselineIndexing(rootDir, options, activeAbortController.signal).catch(
 				() => {},
 			);
