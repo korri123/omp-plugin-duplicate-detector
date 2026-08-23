@@ -15,7 +15,7 @@
 		"resolveJsonModule": true,
 		"esModuleInterop": true,
 		"forceConsistentCasingInFileNames": true,
-		"types": ["bun", "node"]
+		"types": ["bun-types", "node"]
 	},
 	"include": ["src", "test", "types"],
 	"exclude": ["node_modules", "dist"]

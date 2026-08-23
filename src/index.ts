@@ -483,18 +483,26 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 			if (rawPath.includes("://")) return;
 
 			const fullPath = path.isAbsolute(rawPath)
-				? rawPath
-				: path.join(ctx.cwd, rawPath);
-			const relPath = (path.relative(ctx.cwd, fullPath) || rawPath).replace(
-				/\\/g,
-				"/",
-			);
+				? path.resolve(rawPath)
+				: path.resolve(ctx.cwd, rawPath);
+			const relPath = path.relative(ctx.cwd, fullPath);
+			const normalizedRelPath = relPath.replace(/\\/g, "/");
 
-			// Skip ignored files (matching ignore patterns or noise files)
-			const ignoreFilter = createIgnoreFilter(config.ignorePatterns);
-			if (ignoreFilter(relPath)) return;
+			// If the mutated file is outside the workspace root or invalid, skip it
+			if (
+				!normalizedRelPath ||
+				normalizedRelPath === ".." ||
+				normalizedRelPath.startsWith("../") ||
+				path.isAbsolute(normalizedRelPath)
+			) {
+				return;
+			}
 
 			try {
+				// Skip ignored files (matching ignore patterns or noise files)
+				const ignoreFilter = createIgnoreFilter(config.ignorePatterns);
+				if (ignoreFilter(normalizedRelPath)) return;
+
 				const file = Bun.file(fullPath);
 				if (!(await file.exists())) return;
 
@@ -503,21 +511,25 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 				// Skip generated files
 				if (isGeneratedContent(content)) return;
 
-				const revision = (fileRevisions.get(relPath) ?? 0) + 1;
-				fileRevisions.set(relPath, revision);
+				const revision = (fileRevisions.get(normalizedRelPath) ?? 0) + 1;
+				fileRevisions.set(normalizedRelPath, revision);
 
 				const { clones } = await coordinator.checkAndUpdate(
 					fullPath,
 					content,
 					revision,
 				);
-				const freshClones = ledger.filterFreshClones(relPath, clones);
+				const freshClones = ledger.filterFreshClones(normalizedRelPath, clones);
 
 				if (freshClones.length > 0) {
-					const reminder = ledger.formatReminder(freshClones, relPath, content);
+					const reminder = ledger.formatReminder(
+						freshClones,
+						normalizedRelPath,
+						content,
+					);
 
 					pi.logger.info("Duplicates detected on file mutation", {
-						file: relPath,
+						file: normalizedRelPath,
 						count: freshClones.length,
 					});
 
@@ -529,7 +541,7 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 								display: true,
 								attribution: "user",
 								details: {
-									filePath: relPath,
+									filePath: normalizedRelPath,
 									clones: freshClones,
 									content,
 								},
@@ -555,7 +567,7 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 				}
 			} catch (err) {
 				pi.logger.warn("Failed checking duplicates for mutated file", {
-					file: relPath,
+					file: normalizedRelPath,
 					error: err instanceof Error ? err.message : String(err),
 				});
 			}
