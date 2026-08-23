@@ -2,7 +2,11 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { isGeneratedContent, JscpdIndexManager } from "../src/jscpd-engine";
+import {
+	createIgnoreFilter,
+	isGeneratedContent,
+	JscpdIndexManager,
+} from "../src/jscpd-engine";
 
 async function setupGitRepo(dir: string): Promise<void> {
 	const init = Bun.spawn(["git", "init", "-b", "main"], { cwd: dir });
@@ -402,5 +406,56 @@ func ProcessOrderBatch(orders []Order, taxRate float64) float64 {
 		expect(goCount).toBe(2);
 		expect(manager.discoveredClones.length).toBeGreaterThanOrEqual(1);
 		expect(manager.discoveredClones[0]!.format).toBe("go");
+	});
+});
+
+describe("createIgnoreFilter", () => {
+	it("ignores default noise patterns such as node_modules, lockfiles, and minified bundles", () => {
+		const filter = createIgnoreFilter();
+		expect(filter("node_modules/pkg/index.js")).toBe(true);
+		expect(filter("package-lock.json")).toBe(true);
+		expect(filter("pnpm-lock.yaml")).toBe(true);
+		expect(filter("dist/bundle.min.js")).toBe(true);
+		expect(filter("src/index.ts")).toBe(false);
+	});
+
+	it("respects user ignore patterns", () => {
+		const filter = createIgnoreFilter(["vendor/**", "generated/*"]);
+		expect(filter("vendor/lib/code.ts")).toBe(true);
+		expect(filter("generated/schema.graphql")).toBe(true);
+		expect(filter("src/schema.graphql")).toBe(false);
+	});
+
+	it("safely handles external relative paths with leading `../` without throwing RangeError", () => {
+		const filter = createIgnoreFilter(["*.graphql"]);
+		// node-ignore throws RangeError on `../` paths; createIgnoreFilter must catch/guard safely
+		expect(
+			filter(
+				"../Users/kormakurgunnlaugsson/Downloads/innova-order-2580739/execution/variant-update.graphql",
+			),
+		).toBe(false);
+		expect(filter("../../external/file.ts")).toBe(false);
+		expect(filter("../outside.js")).toBe(false);
+	});
+
+	it("safely handles absolute paths without throwing RangeError", () => {
+		const filter = createIgnoreFilter(["dist/**"]);
+		expect(
+			filter(
+				"/Users/kormakurgunnlaugsson/Downloads/innova-order-2580739/execution/variant-update.graphql",
+			),
+		).toBe(false);
+		expect(filter("C:/Users/project/src/index.ts")).toBe(false);
+	});
+
+	it("handles edge cases such as empty string, dots, Windows backslashes, and leading `./`", () => {
+		const filter = createIgnoreFilter(["dist/**"]);
+		expect(filter("")).toBe(false);
+		expect(filter("   ")).toBe(false);
+		expect(filter(".")).toBe(false);
+		expect(filter("..")).toBe(false);
+		expect(filter("./src/index.ts")).toBe(false);
+		expect(filter("./dist/bundle.js")).toBe(true);
+		expect(filter("dist\\bundle.js")).toBe(true);
 	});
 });

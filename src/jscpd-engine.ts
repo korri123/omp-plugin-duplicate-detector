@@ -119,8 +119,22 @@ export function createIgnoreFilter(
 ): (relPath: string) => boolean {
 	const ig = ignore().add(DEFAULT_NOISE_PATTERNS).add(userIgnorePatterns);
 	return (relPath: string) => {
-		const normalized = relPath.replace(/\\/g, "/").replace(/^\.\//, "");
-		return ig.ignores(normalized);
+		if (!relPath || typeof relPath !== "string") return false;
+		const normalized = relPath.trim().replace(/\\/g, "/").replace(/^\.\//, "");
+		if (!normalized || normalized === ".") return false;
+		if (
+			normalized.startsWith("../") ||
+			normalized === ".." ||
+			normalized.startsWith("/") ||
+			path.isAbsolute(normalized)
+		) {
+			return false;
+		}
+		try {
+			return ig.ignores(normalized);
+		} catch {
+			return false;
+		}
 	};
 }
 
@@ -183,9 +197,21 @@ export async function getTrackedGitFiles(
 
 			if (results.length >= maxPaths) break;
 
-			const relPath = trimmed.replace(/\\/g, "/");
-			if (baseIgnore.ignores(relPath)) continue;
-
+			const relPath = trimmed.replace(/\\/g, "/").replace(/^\.\//, "");
+			if (
+				!relPath ||
+				relPath === ".." ||
+				relPath.startsWith("../") ||
+				relPath.startsWith("/") ||
+				path.isAbsolute(relPath)
+			) {
+				continue;
+			}
+			try {
+				if (baseIgnore.ignores(relPath)) continue;
+			} catch {
+				// Ignore errors from node-ignore
+			}
 			results.push(path.resolve(rootDir, trimmed));
 		}
 		return results;

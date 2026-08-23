@@ -420,6 +420,61 @@ export function computeMetrics(data: number[]): { sum: number; avg: number } {
 		expect(warnings2.length).toBe(0);
 	});
 
+	it("gracefully handles tool_result mutations for files outside the workspace root", async () => {
+		const harness = createMockHarness();
+		duplicateDetectorExtension(harness.api);
+		const mockCtx = await harness.startSession(tempDir);
+
+		const toolResultHandlers = harness.eventHandlers["tool_result"] || [];
+		expect(toolResultHandlers.length).toBeGreaterThanOrEqual(1);
+
+		const code = `
+export function testMutation(): void {
+	console.log("some code");
+}
+`;
+		// 1. External path starting with `../`
+		await expect(
+			toolResultHandlers[0]!(
+				{
+					type: "tool_result",
+					toolName: "write",
+					toolCallId: "call_external_rel",
+					input: {
+						path: "../Users/kormakurgunnlaugsson/Downloads/innova-order-2580739/execution/variant-update.graphql",
+						content: code,
+					},
+					content: [{ type: "text", text: "ok" }],
+					isError: false,
+				},
+				mockCtx,
+			),
+		).resolves.toBeUndefined();
+
+		// 2. Absolute external path
+		await expect(
+			toolResultHandlers[0]!(
+				{
+					type: "tool_result",
+					toolName: "edit",
+					toolCallId: "call_external_abs",
+					input: {
+						path: "/tmp/innova-order-2580739/execution/variant-update.graphql",
+						content: code,
+					},
+					content: [{ type: "text", text: "ok" }],
+					isError: false,
+				},
+				mockCtx,
+			),
+		).resolves.toBeUndefined();
+
+		const warnings = harness.sentMessages.filter(
+			(m) => m.msg.customType === "duplicate-detector-warning",
+		);
+		expect(warnings.length).toBe(0);
+	});
+
 	it("preserves active OMP settings as overrides when detect_duplicates scans a subproject", async () => {
 		const subprojectDir = path.join(tempDir, "subproject");
 		await fs.mkdir(subprojectDir, { recursive: true });
