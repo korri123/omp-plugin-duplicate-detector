@@ -9,6 +9,7 @@ import {
 } from "./config-loader";
 import { DuplicateLedger } from "./duplicate-ledger";
 import {
+	type BaselineStatus,
 	createIgnoreFilter,
 	isGeneratedContent,
 	JscpdIndexManager,
@@ -16,6 +17,8 @@ import {
 import {
 	DuplicateNotificationComponent,
 	type DuplicateNotificationData,
+	DuplicateStatusComponent,
+	type DuplicateStatusData,
 	type ThemeLike,
 } from "./tui-notification";
 
@@ -167,6 +170,58 @@ function extractSettingsObject(
 	return undefined;
 }
 
+function notifyBaselineStatus(
+	pi: ExtensionAPI,
+	ctx:
+		| {
+				ui?: {
+					notify: (msg: string, type?: "info" | "warning" | "error") => void;
+				};
+		  }
+		| undefined,
+	status: BaselineStatus,
+	count: number,
+): void {
+	let message = "";
+	let level: "info" | "warning" = "info";
+
+	if (status === "complete") {
+		message = `Duplicate detector: Ready (${count} Git file${count === 1 ? "" : "s"} indexed)`;
+		level = "info";
+	} else if (status === "skipped_not_git") {
+		message =
+			"Duplicate detector: Baseline skipped (not a Git repository; mutation checks active)";
+		level = "info";
+	} else if (status === "capped_file_count") {
+		message = `Duplicate detector: Ready (${count} files indexed, capped at 2,500 file limit)`;
+		level = "warning";
+	} else if (status === "capped_source_bytes") {
+		message = `Duplicate detector: Ready (${count} files indexed, capped at 64 MB limit)`;
+		level = "warning";
+	}
+
+	if (!message) return;
+
+	// 1. Send transient TUI toast if UI is active
+	ctx?.ui?.notify?.(message, level);
+
+	// 2. Send persistent transcript notification into the chat feed
+	pi.sendMessage(
+		{
+			customType: "duplicate-detector-status",
+			content: message,
+			display: true,
+			attribution: "user",
+			details: {
+				status,
+				count,
+				content: message,
+			},
+		},
+		{ triggerTurn: false },
+	);
+}
+
 /**
  * Main extension factory for oh-my-pi duplicate detector plugin powered by jscpd.
  */
@@ -194,7 +249,8 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 
 		if (ctx?.cwd) {
 			try {
-				await engine.initialize(ctx.cwd, config.ignorePatterns);
+				const count = await engine.initialize(ctx.cwd, config.ignorePatterns);
+				notifyBaselineStatus(pi, ctx, engine.baselineStatus, count);
 			} catch {
 				// Ignore background errors
 			}
@@ -230,7 +286,9 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 			pi.logger.info("Duplicate detector index ready", {
 				filesIndexed: count,
 				configSource: config.configSource ?? "default",
+				baselineStatus: engine.baselineStatus,
 			});
+			notifyBaselineStatus(pi, ctx, engine.baselineStatus, count);
 		} catch (err) {
 			pi.logger.warn("Duplicate detector background indexing failed", {
 				error: err instanceof Error ? err.message : String(err),
@@ -582,6 +640,17 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 					options?.expanded ?? false,
 					theme as ThemeLike,
 				);
+			},
+		);
+
+		pi.registerMessageRenderer<DuplicateStatusData>(
+			"duplicate-detector-status",
+			(message, _options, theme) => {
+				const data = message.details || {
+					content:
+						typeof message.content === "string" ? message.content : undefined,
+				};
+				return new DuplicateStatusComponent(data, theme as ThemeLike);
 			},
 		);
 	}

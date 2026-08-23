@@ -16,12 +16,27 @@ interface ToolTextContent {
 	text: string;
 }
 
+export interface MockSentMessage {
+	msg: {
+		customType?: string;
+		content?: string;
+		display?: boolean;
+		attribution?: string;
+		details?: Record<string, unknown>;
+	};
+	opts?: {
+		deliverAs?: string;
+		triggerTurn?: boolean;
+	};
+}
+
 interface MockHarness {
 	api: ExtensionAPI;
 	eventHandlers: Record<string, Function[]>;
 	registeredTools: ToolDefinition[];
 	registeredCommands: Record<string, Partial<RegisteredCommand>>;
-	sentMessages: Array<{ msg: unknown; opts: unknown }>;
+	sentMessages: MockSentMessage[];
+	uiNotifications: Array<{ message: string; type?: string }>;
 	createContext: (cwd: string) => Partial<ExtensionContext>;
 	startSession: (
 		cwd: string,
@@ -33,8 +48,8 @@ function createMockHarness(): MockHarness {
 	const eventHandlers: Record<string, Function[]> = {};
 	const registeredTools: ToolDefinition[] = [];
 	const registeredCommands: Record<string, Partial<RegisteredCommand>> = {};
-	const sentMsgs: Array<{ msg: unknown; opts: unknown }> = [];
-
+	const sentMsgs: MockSentMessage[] = [];
+	const uiNotifications: Array<{ message: string; type?: string }> = [];
 	const mockZod = {
 		object: (s: unknown) => ({
 			shape: s,
@@ -76,7 +91,10 @@ function createMockHarness(): MockHarness {
 		},
 		registerMessageRenderer: () => {},
 		sendMessage: (msg: unknown, opts: unknown) => {
-			sentMsgs.push({ msg, opts });
+			sentMsgs.push({
+				msg: (msg ?? {}) as MockSentMessage["msg"],
+				opts: (opts ?? {}) as MockSentMessage["opts"],
+			});
 		},
 	} as unknown as ExtensionAPI;
 
@@ -85,8 +103,9 @@ function createMockHarness(): MockHarness {
 			cwd,
 			hasUI: true,
 			ui: {
-				notify: () => {},
-				confirm: async () => true,
+				notify: (message: string, type?: "info" | "warning" | "error") => {
+					uiNotifications.push({ message, type });
+				},
 				input: async () => "",
 				select: async () => "",
 				setStatus: () => {},
@@ -111,6 +130,7 @@ function createMockHarness(): MockHarness {
 		registeredTools,
 		registeredCommands,
 		sentMessages: sentMsgs,
+		uiNotifications,
 		createContext,
 		startSession,
 	};
@@ -189,13 +209,13 @@ export function validateTransactionPayload(tx: { id: string; amount: number; sen
 		expect(result).toBeUndefined();
 
 		// Check steer message
-		expect(harness.sentMessages.length).toBe(1);
-		const sent = harness.sentMessages[0]!;
-		const sentOpts = sent.opts as { deliverAs?: string };
-		const sentMsg = sent.msg as { customType?: string };
-		expect(sentOpts.deliverAs).toBe("steer");
-		expect(sentMsg.customType).toBe("duplicate-detector-warning");
-
+		const warnings = harness.sentMessages.filter(
+			(m) => m.msg.customType === "duplicate-detector-warning",
+		);
+		expect(warnings.length).toBe(1);
+		const sent = warnings[0]!;
+		expect(sent.opts?.deliverAs).toBe("steer");
+		expect(sent.msg.customType).toBe("duplicate-detector-warning");
 		// Deduplication check
 		const secondResult = (await toolResultHandlers[0]!(
 			toolResultEvent,
@@ -267,7 +287,10 @@ export function computeInvoiceTaxes(items: Array<{ price: number; taxRate: numbe
 		);
 		expect(textItem.text).toContain("invoice-taxes.ts");
 		expect(textItem.text).toContain("computeInvoiceTaxes");
-		expect(harness.sentMessages.length).toBe(0);
+		const warnings = harness.sentMessages.filter(
+			(m) => m.msg.customType === "duplicate-detector-warning",
+		);
+		expect(warnings.length).toBe(0);
 	});
 
 	it("loads and applies .jscpd.json project configuration on session_start", async () => {
@@ -319,11 +342,14 @@ export function processCustomOrder(order: { id: string; amount: number; user: st
 
 		await toolResultHandlers[0]!(toolResultEvent, mockCtx);
 
-		expect(harness.sentMessages.length).toBe(1);
-		const message = harness.sentMessages[0]!.msg as { content?: string };
-		expect(message.content).toContain("order-b.customts");
-		expect(message.content).toContain("order-a.customts");
-		expect(message.content).not.toContain("old-order.customts");
+		const warnings = harness.sentMessages.filter(
+			(m) => m.msg.customType === "duplicate-detector-warning",
+		);
+		expect(warnings.length).toBe(1);
+		const messageContent = warnings[0]?.msg.content ?? "";
+		expect(messageContent).toContain("order-b.customts");
+		expect(messageContent).toContain("order-a.customts");
+		expect(messageContent).not.toContain("old-order.customts");
 	});
 
 	it("skips checking ignored and generated files on tool_result mutation", async () => {
@@ -369,8 +395,10 @@ export function computeMetrics(data: number[]): { sum: number; avg: number } {
 			mockCtx,
 		);
 
-		expect(harness.sentMessages.length).toBe(0);
-
+		const warnings = harness.sentMessages.filter(
+			(m) => m.msg.customType === "duplicate-detector-warning",
+		);
+		expect(warnings.length).toBe(0);
 		// 2. Mutate a generated file: should be skipped
 		const genCode = `// @generated DO NOT EDIT\n${code}`;
 		await Bun.write(path.join(tempDir, "generated-copy.ts"), genCode);
@@ -386,8 +414,10 @@ export function computeMetrics(data: number[]): { sum: number; avg: number } {
 			},
 			mockCtx,
 		);
-
-		expect(harness.sentMessages.length).toBe(0);
+		const warnings2 = harness.sentMessages.filter(
+			(m) => m.msg.customType === "duplicate-detector-warning",
+		);
+		expect(warnings2.length).toBe(0);
 	});
 
 	it("preserves active OMP settings as overrides when detect_duplicates scans a subproject", async () => {
@@ -503,13 +533,54 @@ export function calculateShippingQuote(weight: number, distance: number, express
 				mockCtx,
 			);
 
-			expect(harness.sentMessages.length).toBe(1);
-			const sent = harness.sentMessages[0]!;
-			const sentMsg = sent.msg as { content?: string };
-			expect(sentMsg.content).toContain("moduleB.ts");
-			expect(sentMsg.content).toContain("moduleA.ts");
+			const warnings = harness.sentMessages.filter(
+				(m) => m.msg.customType === "duplicate-detector-warning",
+			);
+			expect(warnings.length).toBe(1);
+			const sent = warnings[0]!;
+			expect(sent.msg.content ?? "").toContain("moduleB.ts");
+			expect(sent.msg.content ?? "").toContain("moduleA.ts");
+
+			// Verify status message in transcript
+			const statusMsgs = harness.sentMessages.filter(
+				(m) => m.msg.customType === "duplicate-detector-status",
+			);
+			expect(statusMsgs.length).toBe(1);
+			expect(statusMsgs[0]?.msg.content).toContain(
+				"Baseline skipped (not a Git repository",
+			);
+			// Verify UI notification for non-git workspace baseline skip
+			const skipNotification = harness.uiNotifications.find((n) =>
+				n.message.includes("Baseline skipped (not a Git repository"),
+			);
+			expect(skipNotification).toBeDefined();
+			expect(skipNotification?.type).toBe("info");
 		} finally {
 			await fs.rm(nonGitDir, { recursive: true, force: true });
 		}
+	});
+
+	it("notifies user with indexed file count when starting in a Git repository", async () => {
+		await Bun.write(path.join(tempDir, "file1.ts"), "export const a = 1;\n");
+		await Bun.write(path.join(tempDir, "file2.ts"), "export const b = 2;\n");
+		await gitTrack(tempDir);
+
+		const harness = createMockHarness();
+		duplicateDetectorExtension(harness.api);
+		await harness.startSession(tempDir);
+
+		const readyNotification = harness.uiNotifications.find((n) =>
+			n.message.includes("Ready (2 Git files indexed)"),
+		);
+		expect(readyNotification).toBeDefined();
+		expect(readyNotification?.type).toBe("info");
+
+		// Verify status message in transcript
+		const statusMsg = harness.sentMessages.find(
+			(m) => m.msg.customType === "duplicate-detector-status",
+		);
+		expect(statusMsg).toBeDefined();
+		expect(statusMsg?.msg.content).toContain("Ready (2 Git files indexed)");
+		expect(statusMsg?.opts?.triggerTurn).toBe(false);
 	});
 });

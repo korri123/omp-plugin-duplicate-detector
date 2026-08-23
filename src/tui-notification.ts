@@ -23,6 +23,11 @@ export interface DuplicateNotificationData {
 	title?: string;
 }
 
+export interface DuplicateStatusData {
+	status?: string;
+	count?: number;
+	content?: string;
+}
 export interface ThemeColors {
 	warning: string;
 	[key: string]: string;
@@ -303,5 +308,66 @@ export class DuplicateNotificationComponent {
 
 		// Leading spacer line above the box (matching TtsrNotificationComponent Spacer(1))
 		return ["", ...boxed];
+	}
+}
+
+/**
+ * TUI Component that renders minimal duplicate detector status notifications in the transcript.
+ */
+export class DuplicateStatusComponent {
+	readonly #data: DuplicateStatusData;
+	readonly #theme: ThemeLike;
+
+	constructor(data: DuplicateStatusData, theme?: ThemeLike) {
+		this.#data = data;
+		this.#theme = {
+			fg:
+				typeof theme?.fg === "function"
+					? theme.fg.bind(theme)
+					: (_color, t) => t,
+			bg:
+				typeof theme?.bg === "function"
+					? theme.bg.bind(theme)
+					: (_color, t) => t,
+			bold:
+				typeof theme?.bold === "function"
+					? theme.bold.bind(theme)
+					: (t) => `\x1b[1m${t}\x1b[22m`,
+			italic:
+				typeof theme?.italic === "function"
+					? theme.italic.bind(theme)
+					: (t) => `\x1b[3m${t}\x1b[23m`,
+			inverse:
+				typeof theme?.inverse === "function"
+					? theme.inverse.bind(theme)
+					: (t) => `\x1b[7m${t}\x1b[27m`,
+			icon: {
+				warning: theme?.icon?.warning ?? "⚠️",
+				...(theme?.icon ?? {}),
+			},
+		};
+	}
+
+	render(_width = 80): readonly string[] {
+		const theme = this.#theme;
+		const text = (this.#data.content || "").trim();
+		if (!text) return [];
+
+		const isWarning =
+			this.#data.status === "capped_file_count" ||
+			this.#data.status === "capped_source_bytes";
+		const isSkipped = this.#data.status === "skipped_not_git";
+
+		const icon = isWarning
+			? (theme.icon.warning ?? "⚠️")
+			: isSkipped
+				? "ℹ️"
+				: "🔍";
+
+		const coloredText = isWarning
+			? theme.fg("warning", text)
+			: theme.italic(text);
+
+		return [`${icon}  ${coloredText}`];
 	}
 }
