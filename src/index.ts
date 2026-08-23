@@ -847,7 +847,8 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 
 	// Register /duplicates slash command
 	pi.registerCommand("duplicates", {
-		description: "Scan workspace for duplicate and clone code blocks",
+		description:
+			"Scan workspace for duplicate and clone code blocks (posts report into transcript without triggering an agent turn)",
 		getArgumentCompletions: (prefix) => {
 			const options = ["--min-lines=5", "--min-tokens=40", "--path="];
 			return options

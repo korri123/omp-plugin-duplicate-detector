@@ -154,7 +154,7 @@ Run `/duplicates` directly within your interactive `omp` session to scan all or 
 /duplicates --path=packages/core --min-lines=10
 ```
 
-The slash command prints a summary notification card with clickable file locations and code previews:
+The slash command runs the scan and appends the resulting report card directly into the session transcript with `{ triggerTurn: false }` (rendered in the TUI without triggering an unwanted AI response turn, but remaining available in conversation history for subsequent agent turns):
 
 ```text
 ┌─ [!] 2 duplicate blocks detected: src/utils/format.ts ────────────────── (r) ┐

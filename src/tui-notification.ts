@@ -1,8 +1,13 @@
 /**
  * TUI notification component for duplicate detector warnings and reports.
  * Styled to visually match the TTSR (Time-Traveling Stream Rules) notification in oh-my-pi.
+ *
+ * Message Renderers:
+ * - 'duplicate-detector-warning': Real-time mutation alerts queued when agent edits introduce duplicate code.
+ * - 'duplicate-detector-report': Interactive report queued by `/duplicates` into the session transcript with
+ *   `triggerTurn: false` (displays full report card without prompting an immediate LLM turn).
+ * - 'duplicate-detector-status': Ready/capped indexing status lines in the session feed.
  */
-
 export interface CloneDuplicationSpan {
 	sourceId: string;
 	start: { line: number; column?: number };
@@ -184,7 +189,8 @@ export function padLine(text: string, width: number): string {
 	return truncateVisible(text, width);
 }
 /**
- * TUI Component that renders duplicate detection notifications in TTSR style.
+ * TUI Component that renders duplicate detection notifications and reports in TTSR style.
+ * Used for both real-time mutation alerts and on-demand `/duplicates` scan reports queued into the transcript.
  */
 export class DuplicateNotificationComponent {
 	readonly #data: DuplicateNotificationData;
