@@ -165,8 +165,8 @@ export class DuplicateNotificationComponent {
 					? theme.inverse.bind(theme)
 					: (t) => `\x1b[7m${t}\x1b[27m`,
 			icon: {
-				warning: theme?.icon?.warning ?? "⚠️",
-				rewind: theme?.icon?.rewind ?? "⤺",
+				warning: theme?.icon?.warning ?? "",
+				rewind: theme?.icon?.rewind ?? "",
 				...(theme?.icon ?? {}),
 			},
 		};
@@ -187,8 +187,10 @@ export class DuplicateNotificationComponent {
 		const theme = this.#theme;
 		const lines: string[] = [];
 
-		const warnIcon = theme.icon?.warning ?? "⚠️";
-		const rewindIcon = theme.icon?.rewind ?? "⤺";
+		const warnIcon = theme.icon?.warning ?? "";
+		const rewindIcon = theme.icon?.rewind ?? "";
+		const warnPrefix = warnIcon ? `${warnIcon} ` : "";
+		const rewindSuffix = rewindIcon ? `  ${rewindIcon}` : "";
 
 		let filePath = this.#data.filePath || "";
 		let clones = this.#data.clones || [];
@@ -203,10 +205,10 @@ export class DuplicateNotificationComponent {
 		let header: string;
 		if (clones.length <= 1) {
 			const target = filePath ? theme.bold(filePath) : "Code Duplication";
-			header = `${warnIcon} Duplicate detected: ${target}  ${rewindIcon}`;
+			header = `${warnPrefix}Duplicate detected: ${target}${rewindSuffix}`;
 		} else {
 			const target = filePath ? theme.bold(filePath) : "workspace";
-			header = `${warnIcon} ${clones.length} duplicate blocks detected: ${target}  ${rewindIcon}`;
+			header = `${warnPrefix}${clones.length} duplicate blocks detected: ${target}${rewindSuffix}`;
 		}
 
 		lines.push(header);
@@ -342,7 +344,7 @@ export class DuplicateStatusComponent {
 					? theme.inverse.bind(theme)
 					: (t) => `\x1b[7m${t}\x1b[27m`,
 			icon: {
-				warning: theme?.icon?.warning ?? "⚠️",
+				warning: theme?.icon?.warning ?? "",
 				...(theme?.icon ?? {}),
 			},
 		};
@@ -356,18 +358,16 @@ export class DuplicateStatusComponent {
 		const isWarning =
 			this.#data.status === "capped_file_count" ||
 			this.#data.status === "capped_source_bytes";
-		const isSkipped = this.#data.status === "skipped_not_git";
 
-		const icon = isWarning
-			? (theme.icon.warning ?? "⚠️")
-			: isSkipped
-				? "ℹ️"
-				: "🔍";
-
+		const prefix = isWarning
+			? theme.icon?.warning
+				? `${theme.icon.warning} `
+				: "[!] "
+			: "";
 		const coloredText = isWarning
-			? theme.fg("warning", text)
+			? theme.fg("warning", `${prefix}${text}`)
 			: theme.italic(text);
 
-		return [`${icon}  ${coloredText}`];
+		return [coloredText];
 	}
 }

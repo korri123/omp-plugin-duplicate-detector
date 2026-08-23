@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import {
 	DuplicateNotificationComponent,
+	DuplicateStatusComponent,
 	parseClonesFromText,
 } from "../src/tui-notification";
 
@@ -217,7 +218,34 @@ const c = 3;
 		expect(() => comp.render(80)).not.toThrow();
 		const rendered = comp.render(80).join("\n");
 		expect(rendered).toContain("Duplicate detected");
-		expect(rendered).toContain("⚠️");
-		expect(rendered).toContain("⤺");
+	});
+
+	it("renders DuplicateStatusComponent with clean status text", () => {
+		const statusComp = new DuplicateStatusComponent({
+			status: "complete",
+			count: 42,
+			content: "Duplicate detector: Ready (42 Git files indexed)",
+		});
+
+		const lines = statusComp.render(80);
+		expect(lines.length).toBe(1);
+		expect(lines[0]).toContain(
+			"Duplicate detector: Ready (42 Git files indexed)",
+		);
+	});
+
+	it("renders DuplicateStatusComponent with warning prefix when capped", () => {
+		const statusComp = new DuplicateStatusComponent({
+			status: "capped_file_count",
+			count: 2500,
+			content:
+				"Duplicate detector: Ready (2,500 files indexed, capped at 2,500 file limit)",
+		});
+
+		const lines = statusComp.render(80);
+		expect(lines.length).toBe(1);
+		expect(lines[0]).toContain(
+			"[!] Duplicate detector: Ready (2,500 files indexed, capped at 2,500 file limit)",
+		);
 	});
 });
