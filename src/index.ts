@@ -1,9 +1,11 @@
 import * as path from "node:path";
 import type { ExtensionAPI, ToolContentItem, ToolResultEventResult } from "@oh-my-pi/pi-coding-agent";
+import { findProjectJscpdConfig, type JscpdProjectConfig } from "./config-loader";
 import { DuplicateLedger } from "./duplicate-ledger";
-import { JscpdIndexManager } from "./jscpd-engine";
+import { createIgnoreFilter, isGeneratedContent, JscpdIndexManager } from "./jscpd-engine";
 import { DuplicateNotificationComponent, type DuplicateNotificationData, type ThemeLike } from "./tui-notification";
 
+export * from "./config-loader";
 export * from "./duplicate-ledger";
 export * from "./jscpd-engine";
 export * from "./tui-notification";
@@ -12,9 +14,12 @@ export * from "./types";
 export interface DuplicateDetectorConfig {
 	minLines: number;
 	minTokens: number;
+	maxLines?: number;
 	checkOnMutation: boolean;
 	reminderMode: "in-band" | "steer" | "none";
 	ignorePatterns: string[];
+	formatsExts?: Record<string, string[]>;
+	configSource?: string;
 }
 
 const DEFAULT_CONFIG: DuplicateDetectorConfig = {
@@ -26,36 +31,90 @@ const DEFAULT_CONFIG: DuplicateDetectorConfig = {
 };
 
 /**
- * Resolves user settings from configuration context with fallback to defaults.
+ * Resolves user settings from configuration context merged with project-level jscpd configuration.
  */
-export function resolveConfig(rawSettings?: Record<string, unknown>): DuplicateDetectorConfig {
-	if (!rawSettings) return { ...DEFAULT_CONFIG };
+export function resolveConfig(
+	rawSettings?: Record<string, unknown>,
+	projectConfig?: JscpdProjectConfig | null,
+): DuplicateDetectorConfig {
+	const baseMinLines = projectConfig?.minLines ?? DEFAULT_CONFIG.minLines;
+	const baseMinTokens = projectConfig?.minTokens ?? DEFAULT_CONFIG.minTokens;
+	const baseMaxLines = projectConfig?.maxLines;
+	const baseFormatsExts = projectConfig?.formatsExts;
+	const projectIgnores = projectConfig?.ignore ?? [];
 
-	const minLines = typeof rawSettings.minLines === "number" ? Math.max(3, rawSettings.minLines) : DEFAULT_CONFIG.minLines;
-	const minTokens = typeof rawSettings.minTokens === "number" ? Math.max(10, rawSettings.minTokens) : DEFAULT_CONFIG.minTokens;
+	let configSource: string | undefined;
+	if (projectConfig?.sourcePath) {
+		configSource = projectConfig.sourceType === "package.json"
+			? `${projectConfig.sourcePath}#jscpd`
+			: projectConfig.sourcePath;
+	}
+
+	if (!rawSettings) {
+		return {
+			minLines: baseMinLines,
+			minTokens: baseMinTokens,
+			maxLines: baseMaxLines,
+			checkOnMutation: DEFAULT_CONFIG.checkOnMutation,
+			reminderMode: DEFAULT_CONFIG.reminderMode,
+			ignorePatterns: projectIgnores,
+			formatsExts: baseFormatsExts,
+			configSource,
+		};
+	}
+
+	const minLines = typeof rawSettings.minLines === "number" ? Math.max(3, rawSettings.minLines) : baseMinLines;
+	const minTokens = typeof rawSettings.minTokens === "number" ? Math.max(10, rawSettings.minTokens) : baseMinTokens;
 	const checkOnMutation = typeof rawSettings.checkOnMutation === "boolean" ? rawSettings.checkOnMutation : DEFAULT_CONFIG.checkOnMutation;
 
 	const reminderMode = rawSettings.reminderMode === "steer" || rawSettings.reminderMode === "none" || rawSettings.reminderMode === "in-band"
 		? rawSettings.reminderMode
 		: DEFAULT_CONFIG.reminderMode;
 
-	let ignorePatterns: string[] = [];
+	let userIgnores: string[] = [];
 	if (typeof rawSettings.ignorePatterns === "string") {
-		ignorePatterns = rawSettings.ignorePatterns
+		userIgnores = rawSettings.ignorePatterns
 			.split(",")
 			.map((p) => p.trim())
 			.filter((p) => p.length > 0);
 	} else if (Array.isArray(rawSettings.ignorePatterns)) {
-		ignorePatterns = rawSettings.ignorePatterns.map(String);
+		userIgnores = rawSettings.ignorePatterns.map(String).map((p) => p.trim()).filter(Boolean);
 	}
+
+	const mergedIgnores = Array.from(new Set([...projectIgnores, ...userIgnores]));
 
 	return {
 		minLines,
 		minTokens,
+		maxLines: baseMaxLines,
 		checkOnMutation,
 		reminderMode,
-		ignorePatterns,
+		ignorePatterns: mergedIgnores,
+		formatsExts: baseFormatsExts,
+		configSource,
 	};
+}
+
+/**
+ * Creates a configured JscpdIndexManager from a DuplicateDetectorConfig.
+ */
+export function createEngineFromConfig(config: DuplicateDetectorConfig, overrides: { minLines?: number; minTokens?: number } = {}): JscpdIndexManager {
+	return new JscpdIndexManager({
+		minLines: overrides.minLines ?? config.minLines,
+		minTokens: overrides.minTokens ?? config.minTokens,
+		maxLines: config.maxLines,
+		formatsExts: config.formatsExts,
+	});
+}
+
+function extractSettingsObject(event: unknown, ctx: unknown): Record<string, unknown> | undefined {
+	if (event && typeof event === "object" && "settings" in event && event.settings && typeof event.settings === "object") {
+		return event.settings as Record<string, unknown>;
+	}
+	if (ctx && typeof ctx === "object" && "settings" in ctx && ctx.settings && typeof ctx.settings === "object") {
+		return ctx.settings as Record<string, unknown>;
+	}
+	return undefined;
 }
 
 /**
@@ -66,29 +125,20 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 
 	pi.setLabel("Duplicate Detector");
 
+	let activeRawSettings: Record<string, unknown> | undefined;
 	let config: DuplicateDetectorConfig = { ...DEFAULT_CONFIG };
-
-	let engine = new JscpdIndexManager({
-		minTokens: config.minTokens,
-		minLines: config.minLines,
-	});
-
+	let engine = createEngineFromConfig(config);
 	const ledger = new DuplicateLedger();
 
 	// Session lifecycle: reset on switch and branch
-	pi.on("session_switch", async (_event, ctx) => {
+	pi.on("session_switch", async (event, ctx) => {
 		ledger.clear();
 		engine.reset();
 
-		let settingsObj: Record<string, unknown> | undefined;
-		if (_event && typeof _event === "object" && "settings" in _event && _event.settings && typeof _event.settings === "object") {
-			settingsObj = _event.settings as Record<string, unknown>;
-		} else if (ctx && typeof ctx === "object" && "settings" in ctx && ctx.settings && typeof ctx.settings === "object") {
-			settingsObj = ctx.settings as Record<string, unknown>;
-		}
-		if (settingsObj) {
-			config = resolveConfig(settingsObj);
-		}
+		activeRawSettings = extractSettingsObject(event, ctx);
+		const projectConfig = ctx?.cwd ? await findProjectJscpdConfig(ctx.cwd) : null;
+		config = resolveConfig(activeRawSettings, projectConfig);
+		engine = createEngineFromConfig(config);
 
 		if (ctx?.cwd) {
 			try {
@@ -104,24 +154,29 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 	});
 
 	// Initialize repository index in background on session start
-	pi.on("session_start", async (_event, ctx) => {
+	pi.on("session_start", async (event, ctx) => {
 		pi.logger.debug("Duplicate detector initializing workspace index", { cwd: ctx.cwd });
 
-		let settingsObj: Record<string, unknown> | undefined;
-		if (_event && typeof _event === "object" && "settings" in _event && _event.settings && typeof _event.settings === "object") {
-			settingsObj = _event.settings as Record<string, unknown>;
-		} else if (ctx && typeof ctx === "object" && "settings" in ctx && ctx.settings && typeof ctx.settings === "object") {
-			settingsObj = ctx.settings as Record<string, unknown>;
+		activeRawSettings = extractSettingsObject(event, ctx);
+		const projectConfig = await findProjectJscpdConfig(ctx.cwd);
+		config = resolveConfig(activeRawSettings, projectConfig);
+		engine = createEngineFromConfig(config);
+
+		if (config.configSource) {
+			pi.logger.info("Duplicate detector loaded project configuration", {
+				source: config.configSource,
+				minLines: config.minLines,
+				minTokens: config.minTokens,
+				ignoreCount: config.ignorePatterns.length,
+			});
 		}
-		config = resolveConfig(settingsObj);
-		engine = new JscpdIndexManager({
-			minTokens: config.minTokens,
-			minLines: config.minLines,
-		});
 
 		try {
 			const count = await engine.initialize(ctx.cwd, config.ignorePatterns);
-			pi.logger.info("Duplicate detector index ready", { filesIndexed: count });
+			pi.logger.info("Duplicate detector index ready", {
+				filesIndexed: count,
+				configSource: config.configSource ?? "default",
+			});
 		} catch (err) {
 			pi.logger.warn("Duplicate detector background indexing failed", {
 				error: err instanceof Error ? err.message : String(err),
@@ -146,11 +201,18 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 		const fullPath = path.isAbsolute(rawPath) ? rawPath : path.join(ctx.cwd, rawPath);
 		const relPath = path.relative(ctx.cwd, fullPath) || rawPath;
 
+		// Skip ignored files (matching ignore patterns or noise files)
+		const ignoreFilter = createIgnoreFilter(config.ignorePatterns);
+		if (ignoreFilter(relPath)) return;
+
 		try {
 			const file = Bun.file(fullPath);
 			if (!(await file.exists())) return;
 
 			const content = await file.text();
+
+			// Skip generated files
+			if (isGeneratedContent(content)) return;
 
 			// If engine is not yet initialized for this workspace, initialize it now
 			if (!engine.isInitialized) {
@@ -251,16 +313,25 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 				? (path.isAbsolute(params.path) ? params.path : path.join(ctx.cwd, params.path))
 				: ctx.cwd;
 
-			const minLines = typeof params.minLines === "number" ? Math.max(3, params.minLines) : config.minLines;
-			const minTokens = typeof params.minTokens === "number" ? Math.max(10, params.minTokens) : config.minTokens;
+			const projectConfig = params.path ? await findProjectJscpdConfig(scanPath) : null;
+			const effectiveConfig = projectConfig ? resolveConfig(activeRawSettings, projectConfig) : config;
+
+			const minLines = typeof params.minLines === "number"
+				? Math.max(3, params.minLines)
+				: effectiveConfig.minLines;
+
+			const minTokens = typeof params.minTokens === "number"
+				? Math.max(10, params.minTokens)
+				: effectiveConfig.minTokens;
+
+			const combinedIgnores = Array.from(new Set([
+				...config.ignorePatterns,
+				...(effectiveConfig.ignorePatterns || []),
+			]));
 
 			try {
-				const scanEngine = new JscpdIndexManager({
-					minLines,
-					minTokens,
-				});
-
-				await scanEngine.initialize(scanPath, config.ignorePatterns, signal);
+				const scanEngine = createEngineFromConfig(effectiveConfig, { minLines, minTokens });
+				await scanEngine.initialize(scanPath, combinedIgnores, signal);
 
 				if (signal?.aborted) {
 					return {
@@ -282,6 +353,7 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 						clones: scanEngine.discoveredClones,
 						filesIndexed: scanEngine.indexedCount,
 						scanPath,
+						configSource: effectiveConfig.configSource ?? null,
 					},
 				};
 			} catch (err) {
@@ -307,18 +379,18 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 		handler: async (args, ctx) => {
 			ctx.ui.notify("Scanning workspace for duplicate code...", "info");
 
-			let minLines = config.minLines;
-			let minTokens = config.minTokens;
 			let targetPath = ctx.cwd;
+			let cliMinLines: number | undefined;
+			let cliMinTokens: number | undefined;
 
 			const parts = args.trim().split(/\s+/).filter(Boolean);
 			for (const part of parts) {
 				if (part.startsWith("--min-lines=")) {
 					const val = Number.parseInt(part.slice("--min-lines=".length), 10);
-					if (!Number.isNaN(val)) minLines = Math.max(3, val);
+					if (!Number.isNaN(val)) cliMinLines = Math.max(3, val);
 				} else if (part.startsWith("--min-tokens=")) {
 					const val = Number.parseInt(part.slice("--min-tokens=".length), 10);
-					if (!Number.isNaN(val)) minTokens = Math.max(10, val);
+					if (!Number.isNaN(val)) cliMinTokens = Math.max(10, val);
 				} else if (part.startsWith("--path=")) {
 					targetPath = path.resolve(ctx.cwd, part.slice("--path=".length));
 				} else if (!part.startsWith("-")) {
@@ -326,9 +398,19 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 				}
 			}
 
+			const projectConfig = targetPath !== ctx.cwd ? await findProjectJscpdConfig(targetPath) : null;
+			const effectiveConfig = projectConfig ? resolveConfig(activeRawSettings, projectConfig) : config;
+
+			const minLines = cliMinLines ?? effectiveConfig.minLines;
+			const minTokens = cliMinTokens ?? effectiveConfig.minTokens;
+			const combinedIgnores = Array.from(new Set([
+				...config.ignorePatterns,
+				...(effectiveConfig.ignorePatterns || []),
+			]));
+
 			try {
-				const scanEngine = new JscpdIndexManager({ minLines, minTokens });
-				const count = await scanEngine.initialize(targetPath, config.ignorePatterns);
+				const scanEngine = createEngineFromConfig(effectiveConfig, { minLines, minTokens });
+				const count = await scanEngine.initialize(targetPath, combinedIgnores);
 				const report = scanEngine.formatReport(scanEngine.discoveredClones, targetPath);
 
 				pi.sendMessage(

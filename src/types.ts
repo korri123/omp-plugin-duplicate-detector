@@ -2,6 +2,8 @@
  * Types and interfaces for the Duplicate Detector plugin.
  */
 
+export type { JscpdProjectConfig } from "./config-loader";
+
 export interface DuplicateCloneBlock {
 	/** Relative or absolute file path containing the clone */
 	filePath: string;

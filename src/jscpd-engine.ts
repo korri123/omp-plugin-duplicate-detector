@@ -69,6 +69,18 @@ export function isGeneratedContent(content: string): boolean {
 	const head = content.slice(0, 2048);
 	return GENERATED_HEADER_MARKERS.some((pattern) => pattern.test(head));
 }
+
+/**
+ * Creates a path ignore predicate matching against default noise patterns
+ * and provided user/project ignore patterns.
+ */
+export function createIgnoreFilter(userIgnorePatterns: string[] = []): (relPath: string) => boolean {
+	const ig = ignore().add(DEFAULT_NOISE_PATTERNS).add(userIgnorePatterns);
+	return (relPath: string) => {
+		const normalized = relPath.replace(/\\/g, "/").replace(/^\.\//, "");
+		return ig.ignores(normalized);
+	};
+}
 /**
  * Isolated overlay store for running non-mutating snippet queries.
  * Prevents virtual query frames from polluting the persistent MemoryStore.
