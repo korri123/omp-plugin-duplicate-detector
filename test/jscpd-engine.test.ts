@@ -115,4 +115,106 @@ export function logEvent(name: string, payload: Record<string, unknown>): void {
 		const clones = await manager.checkSnippet(path.join(tempDir, "analytics.ts"), code);
 		expect(clones.length).toBe(1);
 	});
+
+	it("automatically detects diverse programming languages without manual extension list", async () => {
+		const pyCode = `
+def calculate_invoice_total(items, tax_rate, discount=0.0):
+    subtotal = sum(item["price"] * item["quantity"] for item in items)
+    discount_amount = subtotal * discount
+    taxable_amount = subtotal - discount_amount
+    total_tax = taxable_amount * tax_rate
+    final_total = taxable_amount + total_tax
+    return final_total
+`;
+		const rsCode = `
+pub fn calculate_invoice_total(items: &[InvoiceItem], tax_rate: f64, discount: f64) -> f64 {
+    let subtotal: f64 = items.iter().map(|item| item.price * item.quantity as f64).sum();
+    let discount_amount = subtotal * discount;
+    let taxable_amount = subtotal - discount_amount;
+    let total_tax = taxable_amount * tax_rate;
+    taxable_amount + total_tax
+}
+`;
+
+		await Bun.write(path.join(tempDir, "tax.py"), pyCode);
+		await Bun.write(path.join(tempDir, "tax.rs"), rsCode);
+
+		const count = await manager.initialize(tempDir);
+		expect(count).toBe(2);
+		expect(manager.isInitialized).toBe(true);
+
+		// Python clone detection
+		const pyClones = await manager.checkSnippet(path.join(tempDir, "tax_v2.py"), pyCode);
+		expect(pyClones.length).toBe(1);
+		expect(pyClones[0]!.format).toBe("python");
+
+		// Rust clone detection
+		const rsClones = await manager.checkSnippet(path.join(tempDir, "tax_v2.rs"), rsCode);
+		expect(rsClones.length).toBe(1);
+		expect(rsClones[0]!.format).toBe("rust");
+	});
+
+	it("filters out lockfiles and minified files automatically", async () => {
+		const dummyJson = `{"name": "test", "version": "1.0.0", "dependencies": {"foo": "1.0.0"}}`;
+		const minCode = `function a(){console.log("minified");return 1;}`;
+
+		await Bun.write(path.join(tempDir, "package-lock.json"), dummyJson);
+		await Bun.write(path.join(tempDir, "bundle.min.js"), minCode);
+		await Bun.write(path.join(tempDir, "main.ts"), `export const app = "ready";\n`);
+
+		const count = await manager.initialize(tempDir);
+		// Only main.ts should be indexed
+		expect(count).toBe(1);
+	});
+
+	it("supports .gitignore negation patterns", async () => {
+		await Bun.write(path.join(tempDir, ".gitignore"), "generated/*\n!generated/keep.ts\n");
+
+		const genDir = path.join(tempDir, "generated");
+		await fs.mkdir(genDir, { recursive: true });
+		await Bun.write(path.join(genDir, "temp.ts"), "export const temp = true;\n");
+		await Bun.write(path.join(genDir, "keep.ts"), "export const keep = true;\n");
+
+		const count = await manager.initialize(tempDir);
+		expect(count).toBe(1);
+	});
+
+	it("respects user-provided ignorePatterns option", async () => {
+		await Bun.write(path.join(tempDir, "fileA.ts"), "export const a = 1;\n");
+		await Bun.write(path.join(tempDir, "test.spec.ts"), "export const b = 2;\n");
+
+		const count = await manager.initialize(tempDir, ["*.spec.ts"]);
+		expect(count).toBe(1);
+	});
+
+	it("excludes files when user provides directory ignore patterns without trailing wildcards", async () => {
+		const distDir = path.join(tempDir, "dist");
+		const srcDir = path.join(tempDir, "src");
+		await fs.mkdir(distDir, { recursive: true });
+		await fs.mkdir(srcDir, { recursive: true });
+
+		await Bun.write(path.join(distDir, "bundle.ts"), "export const bundle = 1;\n");
+		await Bun.write(path.join(srcDir, "index.ts"), "export const app = 2;\n");
+
+		const count = await manager.initialize(tempDir, ["dist"]);
+		expect(count).toBe(1);
+		expect(manager.indexedCount).toBe(1);
+	});
+
+	it("scopes rooted rules in nested subdirectories correctly", async () => {
+		const pkgDir = path.join(tempDir, "packages", "core");
+		const otherDir = path.join(tempDir, "packages", "other");
+		await fs.mkdir(path.join(pkgDir, "build"), { recursive: true });
+		await fs.mkdir(path.join(otherDir, "build"), { recursive: true });
+
+		// Nested .gitignore with rooted rule /build
+		await Bun.write(path.join(pkgDir, ".gitignore"), "/build/\n");
+		await Bun.write(path.join(pkgDir, "build", "out.ts"), "export const out = 1;\n");
+		await Bun.write(path.join(pkgDir, "index.ts"), "export const index = 1;\n");
+		await Bun.write(path.join(otherDir, "build", "out.ts"), "export const other = 1;\n");
+
+		const count = await manager.initialize(tempDir);
+		// pkgDir/build/out.ts is ignored by nested gitignore, but otherDir/build/out.ts and pkgDir/index.ts are indexed
+		expect(count).toBe(2);
+	});
 });

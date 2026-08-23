@@ -63,8 +63,8 @@
       },
       "ignorePatterns": {
         "type": "string",
-        "description": "Comma-separated glob patterns to ignore during duplicate detection",
-        "default": "node_modules/**,dist/**,build/**,.git/**,coverage/**"
+        "description": "Additional comma-separated glob patterns to ignore during duplicate detection",
+        "default": ""
       }
     }
   },

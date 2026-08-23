@@ -2,10 +2,9 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { detectDuplicates } from "../src/detector";
+import { JscpdIndexManager } from "../src/jscpd-engine";
 import duplicateDetectorExtension from "../src/index";
 import type { ExtensionAPI, ToolDefinition, RegisteredCommand } from "@oh-my-pi/pi-coding-agent";
-
 describe("duplicate detector", () => {
 	let tempDir: string;
 
@@ -35,18 +34,19 @@ export function calculateMetrics(data: number[]): { sum: number; avg: number } {
 		await Bun.write(fileA, `// File A header\nimport { foo } from "./foo";\n${sharedCode}\nconsole.log("done A");\n`);
 		await Bun.write(fileB, `// File B header\nimport { bar } from "./bar";\n${sharedCode}\nconsole.log("done B");\n`);
 
-		const result = await detectDuplicates({
-			rootPath: tempDir,
+		const manager = new JscpdIndexManager({
 			minLines: 5,
 			minTokens: 20,
 		});
 
-		expect(result.matches.length).toBeGreaterThanOrEqual(1);
-		const match = result.matches[0]!;
-		expect(match.instances.length).toBe(2);
-		expect(match.instances.some((inst) => inst.filePath.includes("fileA.ts"))).toBe(true);
-		expect(match.instances.some((inst) => inst.filePath.includes("fileB.ts"))).toBe(true);
-		expect(result.totalDuplicatedLines).toBeGreaterThanOrEqual(5);
+		const count = await manager.initialize(tempDir);
+		expect(count).toBe(2);
+		expect(manager.discoveredClones.length).toBeGreaterThanOrEqual(1);
+
+		const clone = manager.discoveredClones[0]!;
+		expect(clone.duplicationA.sourceId).toContain("file");
+		expect(clone.duplicationB.sourceId).toContain("file");
+		expect(clone.format).toBe("typescript");
 	});
 
 	it("returns empty matches when no duplicate exceeds the line threshold", async () => {
@@ -56,16 +56,14 @@ export function calculateMetrics(data: number[]): { sum: number; avg: number } {
 		await Bun.write(fileA, `export const a = 1;\nexport const b = 2;\n`);
 		await Bun.write(fileB, `export const x = 10;\nexport const y = 20;\n`);
 
-		const result = await detectDuplicates({
-			rootPath: tempDir,
+		const manager = new JscpdIndexManager({
 			minLines: 4,
 			minTokens: 20,
 		});
 
-		expect(result.matches.length).toBe(0);
-		expect(result.totalDuplicatedLines).toBe(0);
+		await manager.initialize(tempDir);
+		expect(manager.discoveredClones.length).toBe(0);
 	});
-
 	it("registers tool and slash command with ExtensionAPI mock", () => {
 		const registeredTools: unknown[] = [];
 		const registeredCommands: Record<string, Partial<RegisteredCommand>> = {};
