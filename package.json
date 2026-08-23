@@ -1,7 +1,7 @@
 {
   "name": "omp-plugin-duplicate-detector",
   "version": "0.1.0",
-  "description": "Code clone and duplication detector plugin for oh-my-pi",
+  "description": "Code clone and duplication detector plugin for oh-my-pi powered by jscpd",
   "type": "module",
   "main": "./src/index.ts",
   "types": "./src/index.ts",
@@ -22,13 +22,14 @@
     "omp-plugin",
     "omp-extension",
     "duplicate-detector",
+    "jscpd",
     "code-clone",
     "refactoring"
   ],
   "license": "MIT",
   "omp": {
     "name": "duplicate-detector",
-    "description": "Detect duplicate and clone code blocks across your codebase",
+    "description": "Detect duplicate and clone code blocks across your codebase powered by jscpd",
     "extensions": [
       "./src/index.ts"
     ],
@@ -36,12 +37,22 @@
       "minLines": {
         "type": "number",
         "description": "Minimum consecutive lines required to report a duplicate block",
-        "default": 6
+        "default": 5
       },
       "minTokens": {
         "type": "number",
         "description": "Minimum token count threshold for code clone detection",
-        "default": 30
+        "default": 40
+      },
+      "checkOnMutation": {
+        "type": "boolean",
+        "description": "Automatically check newly written/edited code for duplicates",
+        "default": true
+      },
+      "reminderMode": {
+        "type": "string",
+        "description": "Feedback style: in-band (<system-reminder> on tool_result), steer (follow-up message), or none",
+        "default": "in-band"
       },
       "ignorePatterns": {
         "type": "string",
@@ -50,9 +61,13 @@
       }
     }
   },
+  "dependencies": {
+    "eventemitter3": "^5.0.4",
+    "spark-md5": "^3.0.2"
+  },
   "devDependencies": {
-    "@oh-my-pi/pi-coding-agent": "link:../oh-my-pi/packages/coding-agent",
     "@types/bun": "^1.3.0",
+    "@types/node": "^22.0.0",
     "typescript": "^5.8.0"
   },
   "peerDependencies": {

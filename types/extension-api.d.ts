@@ -63,6 +63,13 @@ export type ToolContentItem = ToolTextContent | ToolImageContent;
 export interface AgentToolResult<TDetails = unknown> {
 	content: ToolContentItem[];
 	details?: TDetails;
+	isError?: boolean;
+}
+
+export interface ToolResultEventResult {
+	content?: ToolContentItem[];
+	details?: unknown;
+	isError?: boolean;
 }
 
 export type AgentToolUpdateCallback<TDetails = unknown> = (update: {
