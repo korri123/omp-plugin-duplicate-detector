@@ -138,6 +138,10 @@ export interface ExtensionAPI {
 	registerCommand(name: string, options: RegisteredCommand): void;
 	registerShortcut(shortcut: string, options: { description?: string; handler: (ctx: ExtensionContext) => Promise<void> | void }): void;
 	registerFlag(name: string, options: { description?: string; type: "boolean" | "string"; default?: boolean | string }): void;
+	registerMessageRenderer<T = unknown>(
+		customType: string,
+		renderer: (message: CustomMessagePayload<T>, options: { expanded: boolean }, theme: any) => any,
+	): void;
 	sendMessage<T = unknown>(message: CustomMessagePayload<T>, options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" }): void;
 	sendUserMessage(content: string, options?: { deliverAs?: "steer" | "followUp" }): void;
 	appendEntry<T = unknown>(customType: string, data?: T): void;

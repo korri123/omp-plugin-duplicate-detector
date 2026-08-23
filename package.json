@@ -54,12 +54,12 @@
       "reminderMode": {
         "type": "enum",
         "enum": [
-          "in-band",
           "steer",
+          "in-band",
           "none"
         ],
-        "description": "Feedback style: in-band (<system-reminder> on tool_result), steer (follow-up message), or none",
-        "default": "in-band"
+        "description": "Feedback style: steer (live TTSR warning card & steer message), in-band (<system-reminder> on tool_result), or none",
+        "default": "steer"
       },
       "ignorePatterns": {
         "type": "string",

@@ -237,26 +237,27 @@ export class JscpdIndexManager {
 		const allClones = await queryDetector.detect(virtualId, content, format);
 
 		// Filter clones:
-		const relevantClones = allClones.filter((clone) => {
+		const relevantClones: IClone[] = [];
+		for (const clone of allClones) {
 			const isAQuery = clone.duplicationA.sourceId === virtualId;
 			const isBQuery = clone.duplicationB.sourceId === virtualId;
 
-			// 1. Cross-file clone against existing repo file
 			if (isAQuery && !isBQuery) {
-				// Exclude comparison against the pre-mutation indexed state of the same file
-				if (clone.duplicationB.sourceId === relPath) {
-					return false;
+				if (clone.duplicationB.sourceId !== relPath) {
+					relevantClones.push(clone);
 				}
-				return true;
+			} else if (!isAQuery && isBQuery) {
+				if (clone.duplicationA.sourceId !== relPath) {
+					relevantClones.push({
+						...clone,
+						duplicationA: clone.duplicationB,
+						duplicationB: clone.duplicationA,
+					});
+				}
+			} else if (isAQuery && isBQuery) {
+				relevantClones.push(clone);
 			}
-
-			// 2. Intra-file clone (duplicate blocks within the same new snippet)
-			if (isAQuery && isBQuery) {
-				return true;
-			}
-
-			return false;
-		});
+		}
 
 		return relevantClones;
 	}

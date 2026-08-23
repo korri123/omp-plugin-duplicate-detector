@@ -69,6 +69,7 @@ export function calculateMetrics(data: number[]): { sum: number; avg: number } {
 	it("registers tool and slash command with ExtensionAPI mock", () => {
 		const registeredTools: unknown[] = [];
 		const registeredCommands: Record<string, Partial<RegisteredCommand>> = {};
+		const registeredMessageRenderers: Record<string, Function> = {};
 		const eventHandlers: Record<string, Function[]> = {};
 		let label = "";
 
@@ -112,6 +113,9 @@ export function calculateMetrics(data: number[]): { sum: number; avg: number } {
 			registerCommand: (name: string, opts: Partial<RegisteredCommand>) => {
 				registeredCommands[name] = opts;
 			},
+			registerMessageRenderer: (type: string, renderer: Function) => {
+				registeredMessageRenderers[type] = renderer;
+			},
 		} as unknown as ExtensionAPI;
 
 		duplicateDetectorExtension(mockPi);
@@ -121,6 +125,8 @@ export function calculateMetrics(data: number[]): { sum: number; avg: number } {
 		const tool = registeredTools[0] as ToolDefinition;
 		expect(tool.name).toBe("detect_duplicates");
 		expect(registeredCommands["duplicates"]).toBeDefined();
+		expect(registeredMessageRenderers["duplicate-detector-warning"]).toBeDefined();
+		expect(registeredMessageRenderers["duplicate-detector-report"]).toBeDefined();
 		expect(eventHandlers["session_start"]).toBeDefined();
 	});
 });

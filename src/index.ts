@@ -1,10 +1,12 @@
 import * as path from "node:path";
-import type { ExtensionAPI, ExtensionContext, ToolContentItem, ToolResultEventResult } from "@oh-my-pi/pi-coding-agent";
+import type { ExtensionAPI, ToolContentItem, ToolResultEventResult } from "@oh-my-pi/pi-coding-agent";
 import { DuplicateLedger } from "./duplicate-ledger";
 import { JscpdIndexManager } from "./jscpd-engine";
+import { DuplicateNotificationComponent, type DuplicateNotificationData, type ThemeLike } from "./tui-notification";
 
 export * from "./duplicate-ledger";
 export * from "./jscpd-engine";
+export * from "./tui-notification";
 export * from "./types";
 
 export interface DuplicateDetectorConfig {
@@ -19,7 +21,7 @@ const DEFAULT_CONFIG: DuplicateDetectorConfig = {
 	minLines: 5,
 	minTokens: 40,
 	checkOnMutation: true,
-	reminderMode: "in-band",
+	reminderMode: "steer",
 	ignorePatterns: [],
 };
 
@@ -78,11 +80,14 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 		ledger.clear();
 		engine.reset();
 
-		if (ctx) {
-			const ctxSettings = (ctx as { settings?: Record<string, unknown> })?.settings;
-			if (ctxSettings) {
-				config = resolveConfig(ctxSettings);
-			}
+		let settingsObj: Record<string, unknown> | undefined;
+		if (_event && typeof _event === "object" && "settings" in _event && _event.settings && typeof _event.settings === "object") {
+			settingsObj = _event.settings as Record<string, unknown>;
+		} else if (ctx && typeof ctx === "object" && "settings" in ctx && ctx.settings && typeof ctx.settings === "object") {
+			settingsObj = ctx.settings as Record<string, unknown>;
+		}
+		if (settingsObj) {
+			config = resolveConfig(settingsObj);
 		}
 
 		if (ctx?.cwd) {
@@ -102,10 +107,13 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 	pi.on("session_start", async (_event, ctx) => {
 		pi.logger.debug("Duplicate detector initializing workspace index", { cwd: ctx.cwd });
 
-		// Resolve settings if available on context or session
-		const ctxSettings = (ctx as { settings?: Record<string, unknown> })?.settings;
-		config = resolveConfig(ctxSettings);
-
+		let settingsObj: Record<string, unknown> | undefined;
+		if (_event && typeof _event === "object" && "settings" in _event && _event.settings && typeof _event.settings === "object") {
+			settingsObj = _event.settings as Record<string, unknown>;
+		} else if (ctx && typeof ctx === "object" && "settings" in ctx && ctx.settings && typeof ctx.settings === "object") {
+			settingsObj = ctx.settings as Record<string, unknown>;
+		}
+		config = resolveConfig(settingsObj);
 		engine = new JscpdIndexManager({
 			minTokens: config.minTokens,
 			minLines: config.minLines,
@@ -171,9 +179,17 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 							content: reminder,
 							display: true,
 							attribution: "user",
+							data: {
+								filePath: relPath,
+								clones: freshClones,
+								content,
+							},
 						},
-						{ deliverAs: "followUp" },
+						{ deliverAs: "steer" },
 					);
+				}
+
+				if (config.reminderMode === "steer") {
 					return;
 				}
 
@@ -321,10 +337,14 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 						content: report,
 						display: true,
 						attribution: "user",
+						data: {
+							filePath: targetPath,
+							clones: scanEngine.discoveredClones,
+							content: report,
+						},
 					},
 					{ triggerTurn: false },
 				);
-
 				ctx.ui.notify(
 					`Duplicate scan finished: ${count} files indexed, ${scanEngine.discoveredClones.length} duplicate clusters found.`,
 					scanEngine.discoveredClones.length > 0 ? "warning" : "info",
@@ -335,4 +355,21 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 			}
 		},
 	});
+
+	// Register TTSR-styled message renderers for duplicate alerts and reports
+	if (typeof pi.registerMessageRenderer === "function") {
+		pi.registerMessageRenderer<DuplicateNotificationData>("duplicate-detector-warning", (message, options, theme) => {
+			const data = message.data || {
+				content: typeof message.content === "string" ? message.content : undefined,
+			};
+			return new DuplicateNotificationComponent(data, options?.expanded ?? false, theme as ThemeLike);
+		});
+
+		pi.registerMessageRenderer<DuplicateNotificationData>("duplicate-detector-report", (message, options, theme) => {
+			const data = message.data || {
+				content: typeof message.content === "string" ? message.content : undefined,
+			};
+			return new DuplicateNotificationComponent(data, options?.expanded ?? false, theme as ThemeLike);
+		});
+	}
 }
