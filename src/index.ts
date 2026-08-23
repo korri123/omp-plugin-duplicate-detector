@@ -391,6 +391,10 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 					},
 					{ deliverAs: "steer" },
 				);
+				lastCtx?.ui?.notify?.(
+					`⚠️ Duplicate detected: ${targetRel} (${freshClones.length} duplicate${freshClones.length === 1 ? "" : "s"})`,
+					"warning",
+				);
 			}
 		}
 	});
@@ -532,6 +536,10 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 						file: normalizedRelPath,
 						count: freshClones.length,
 					});
+					ctx?.ui?.notify?.(
+						`⚠️ Duplicate detected: ${normalizedRelPath} (${freshClones.length} duplicate${freshClones.length === 1 ? "" : "s"})`,
+						"warning",
+					);
 
 					if (config.reminderMode === "steer") {
 						pi.sendMessage(
@@ -551,7 +559,7 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 						return;
 					}
 
-					// In-band TTSR-style injection: prepend <system-reminder> to tool result content
+					// Prepend <system-reminder> to tool result content for in-band display
 					const originalContent = Array.isArray(event.content)
 						? (event.content as Array<{ type: "text"; text: string }>)
 						: [{ type: "text" as const, text: String(event.content ?? "") }];

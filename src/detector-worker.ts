@@ -383,6 +383,18 @@ async function runIncrementalGitReconciliation(
 
 			await yieldTask();
 		}
+
+		if (!signal.aborted) {
+			self.postMessage(
+				createCompleteEvent({
+					indexedCount: currentIndex.stats().sourceCount,
+					totalSourceBytes: 0,
+					cloneCount: currentIndex.clones.length,
+					durationMs: 0,
+					status: "complete",
+				}),
+			);
+		}
 	} catch {
 		// Non-fatal error during incremental reconciliation
 	}
