@@ -43,6 +43,18 @@ interface MockHarness {
 		settings?: Record<string, unknown>,
 	) => Promise<Partial<ExtensionContext>>;
 }
+async function waitFor(
+	condition: () => boolean,
+	timeoutMs = 2000,
+): Promise<void> {
+	const start = Date.now();
+	while (!condition()) {
+		if (Date.now() - start > timeoutMs) {
+			throw new Error(`waitFor condition timed out after ${timeoutMs}ms`);
+		}
+		await new Promise((resolve) => setTimeout(resolve, 5));
+	}
+}
 
 function createMockHarness(): MockHarness {
 	const eventHandlers: Record<string, Function[]> = {};
@@ -121,6 +133,13 @@ function createMockHarness(): MockHarness {
 		for (const handler of eventHandlers["session_start"] || []) {
 			await handler({ type: "session_start", settings }, ctx);
 		}
+		await waitFor(
+			() =>
+				sentMsgs.some(
+					(m) => m.msg.customType === "duplicate-detector-status",
+				) || uiNotifications.length > 0,
+			2000,
+		).catch(() => {});
 		return ctx;
 	};
 

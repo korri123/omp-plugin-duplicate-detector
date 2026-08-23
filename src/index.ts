@@ -1,12 +1,15 @@
 import * as path from "node:path";
+import type { IClone } from "@jscpd/core";
 import type {
 	ExtensionAPI,
+	ExtensionContext,
 	ToolResultEventResult,
 } from "@oh-my-pi/pi-coding-agent";
 import {
 	findProjectJscpdConfig,
 	type JscpdProjectConfig,
 } from "./config-loader";
+import { DuplicateDetectorCoordinator } from "./coordinator";
 import { DuplicateLedger } from "./duplicate-ledger";
 import {
 	type BaselineStatus,
@@ -23,10 +26,14 @@ import {
 } from "./tui-notification";
 
 export * from "./config-loader";
+export * from "./coordinator";
+export * from "./disk-cache";
 export * from "./duplicate-ledger";
 export * from "./jscpd-engine";
+export * from "./source-aware-index";
 export * from "./tui-notification";
 export * from "./types";
+export * from "./worker-protocol";
 
 export interface DuplicateDetectorConfig {
 	minLines: number;
@@ -145,6 +152,64 @@ export function createEngineFromConfig(
 	});
 }
 
+/**
+ * Formats discovered clone clusters into a Markdown report.
+ */
+export function formatReport(
+	clones: IClone[] = [],
+	scanPath = ".",
+	options?: {
+		indexedCount?: number;
+		baselineStatus?: BaselineStatus;
+		minLines?: number;
+		minTokens?: number;
+	},
+): string {
+	let report = "# Duplicate Code Report\n\n";
+	if (typeof options?.indexedCount === "number") {
+		report += `- **Indexed Files**: ${options.indexedCount}\n`;
+	}
+	report += `- **Scan Target**: \`${scanPath || "."}\`\n`;
+	report += `- **Duplicate Clusters Found**: ${clones.length}\n`;
+
+	if (options?.baselineStatus === "skipped_not_git") {
+		report +=
+			"- **Baseline Status**: Skipped (Directory is not inside a Git working tree; automatic scan requires Git-tracked files)\n";
+	} else if (options?.baselineStatus === "capped_file_count") {
+		report += "- **Baseline Status**: Capped at 2,500 file limit\n";
+	} else if (options?.baselineStatus === "capped_source_bytes") {
+		report += "- **Baseline Status**: Capped at 64 MB limit\n";
+	}
+
+	report += "\n";
+
+	if (clones.length === 0) {
+		const minLines = options?.minLines ?? 5;
+		const minTokens = options?.minTokens ?? 40;
+		report += `No duplicate code blocks found matching threshold (minLines: ${minLines}, minTokens: ${minTokens}).\n`;
+		return report;
+	}
+
+	report += "## Detected Clones\n\n";
+	for (let i = 0; i < clones.length; i++) {
+		const clone = clones[i]!;
+		const a = clone.duplicationA;
+		const b = clone.duplicationB;
+		const linesCount = a.end.line - a.start.line + 1;
+
+		report += `### Clone #${i + 1} (${linesCount} lines, format: ${clone.format})\n`;
+		report += `- **Location A**: \`${a.sourceId}:${a.start.line}-${a.end.line}\`\n`;
+		report += `- **Location B**: \`${b.sourceId}:${b.start.line}-${b.end.line}\`\n`;
+
+		if (a.fragment) {
+			report += `\n\`\`\`${clone.format}\n${a.fragment.trim()}\n\`\`\`\n`;
+		}
+		report += "\n";
+	}
+
+	return report;
+}
+
 function extractSettingsObject(
 	event: unknown,
 	ctx: unknown,
@@ -232,25 +297,122 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 
 	let activeRawSettings: Record<string, unknown> | undefined;
 	let config: DuplicateDetectorConfig = { ...DEFAULT_CONFIG };
-	let engine = createEngineFromConfig(config);
+	let currentCwd: string = process.cwd();
+	let lastCtx: ExtensionContext | undefined;
 	const ledger = new DuplicateLedger();
+	const fileRevisions = new Map<string, number>();
+	const coordinator = new DuplicateDetectorCoordinator();
+
+	// Wire coordinator event listeners
+	coordinator.on("progress", (payload) => {
+		pi.logger.debug("Duplicate detector indexing progress", {
+			...payload,
+		});
+	});
+
+	coordinator.on("complete", (payload) => {
+		const status: BaselineStatus = payload.status ?? "complete";
+		notifyBaselineStatus(pi, lastCtx, status, payload.indexedCount);
+	});
+
+	coordinator.on("status", (payload) => {
+		pi.logger.debug("Duplicate detector worker status", {
+			...payload,
+		});
+	});
+
+	coordinator.on("error", (err) => {
+		pi.logger.warn("Duplicate detector coordinator error", {
+			error: err instanceof Error ? err.message : String(err),
+		});
+	});
+
+	coordinator.on("lateFinding", async ({ clone }) => {
+		if (!config.checkOnMutation || config.reminderMode === "none") return;
+
+		const sourceA = clone.duplicationA.sourceId;
+		const sourceB = clone.duplicationB.sourceId;
+
+		const relA = (
+			path.isAbsolute(sourceA) && currentCwd
+				? path.relative(currentCwd, sourceA)
+				: sourceA
+		).replace(/\\/g, "/");
+
+		const relB = (
+			path.isAbsolute(sourceB) && currentCwd
+				? path.relative(currentCwd, sourceB)
+				: sourceB
+		).replace(/\\/g, "/");
+
+		// Determine if either file is one that was recently mutated in the active session
+		const targetRel = fileRevisions.has(relA)
+			? relA
+			: fileRevisions.has(relB)
+				? relB
+				: undefined;
+
+		if (!targetRel) return;
+
+		const freshClones = ledger.filterFreshClones(targetRel, [clone]);
+		if (freshClones.length > 0) {
+			const fullPath = path.isAbsolute(targetRel)
+				? targetRel
+				: path.join(currentCwd, targetRel);
+			let content: string | undefined;
+			try {
+				const file = Bun.file(fullPath);
+				if (await file.exists()) {
+					content = await file.text();
+				}
+			} catch {}
+
+			const reminder = ledger.formatReminder(freshClones, targetRel, content);
+			pi.logger.info("Late clone finding surfaced for file mutation", {
+				file: targetRel,
+				cloneCount: freshClones.length,
+			});
+
+			if (
+				config.reminderMode === "steer" ||
+				config.reminderMode === "in-band"
+			) {
+				pi.sendMessage(
+					{
+						customType: "duplicate-detector-warning",
+						content: reminder,
+						display: true,
+						attribution: "user",
+						details: {
+							filePath: targetRel,
+							clones: freshClones,
+							content,
+						},
+					},
+					{ deliverAs: "steer" },
+				);
+			}
+		}
+	});
 
 	// Session lifecycle: reset on switch and branch
 	pi.on("session_switch", async (event, ctx) => {
 		ledger.clear();
-		engine.reset();
+		fileRevisions.clear();
+		if (ctx?.cwd) {
+			currentCwd = ctx.cwd;
+		}
+		lastCtx = ctx as ExtensionContext;
 
 		activeRawSettings = extractSettingsObject(event, ctx);
 		const projectConfig = ctx?.cwd
 			? await findProjectJscpdConfig(ctx.cwd)
 			: null;
 		config = resolveConfig(activeRawSettings, projectConfig);
-		engine = createEngineFromConfig(config);
 
 		if (ctx?.cwd) {
 			try {
-				const count = await engine.initialize(ctx.cwd, config.ignorePatterns);
-				notifyBaselineStatus(pi, ctx, engine.baselineStatus, count);
+				await coordinator.openWorkspace(ctx.cwd, config);
 			} catch {
 				// Ignore background errors
 			}
@@ -259,10 +421,25 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 
 	pi.on("session_branch", async () => {
 		ledger.clear();
+		fileRevisions.clear();
 	});
 
-	// Initialize repository index in background on session start
+	pi.on("session_shutdown", async () => {
+		await coordinator.dispose();
+	});
+
+	if (typeof process !== "undefined" && typeof process.on === "function") {
+		process.once("beforeExit", () => {
+			coordinator.dispose().catch(() => {});
+		});
+	}
+
+	// Initialize repository index in background on session start (non-blocking)
 	pi.on("session_start", async (event, ctx) => {
+		currentCwd = ctx.cwd;
+		lastCtx = ctx as ExtensionContext;
+		fileRevisions.clear();
+
 		pi.logger.debug("Duplicate detector initializing workspace index", {
 			cwd: ctx.cwd,
 		});
@@ -270,7 +447,6 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 		activeRawSettings = extractSettingsObject(event, ctx);
 		const projectConfig = await findProjectJscpdConfig(ctx.cwd);
 		config = resolveConfig(activeRawSettings, projectConfig);
-		engine = createEngineFromConfig(config);
 
 		if (config.configSource) {
 			pi.logger.info("Duplicate detector loaded project configuration", {
@@ -282,13 +458,7 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 		}
 
 		try {
-			const count = await engine.initialize(ctx.cwd, config.ignorePatterns);
-			pi.logger.info("Duplicate detector index ready", {
-				filesIndexed: count,
-				configSource: config.configSource ?? "default",
-				baselineStatus: engine.baselineStatus,
-			});
-			notifyBaselineStatus(pi, ctx, engine.baselineStatus, count);
+			await coordinator.openWorkspace(ctx.cwd, config);
 		} catch (err) {
 			pi.logger.warn("Duplicate detector background indexing failed", {
 				error: err instanceof Error ? err.message : String(err),
@@ -315,7 +485,10 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 			const fullPath = path.isAbsolute(rawPath)
 				? rawPath
 				: path.join(ctx.cwd, rawPath);
-			const relPath = path.relative(ctx.cwd, fullPath) || rawPath;
+			const relPath = (path.relative(ctx.cwd, fullPath) || rawPath).replace(
+				/\\/g,
+				"/",
+			);
 
 			// Skip ignored files (matching ignore patterns or noise files)
 			const ignoreFilter = createIgnoreFilter(config.ignorePatterns);
@@ -330,17 +503,15 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 				// Skip generated files
 				if (isGeneratedContent(content)) return;
 
-				// If engine is not yet initialized for this workspace, initialize it now
-				if (!engine.isInitialized) {
-					await engine.initialize(ctx.cwd, config.ignorePatterns);
-				}
+				const revision = (fileRevisions.get(relPath) ?? 0) + 1;
+				fileRevisions.set(relPath, revision);
 
-				// Check snippet against existing indexed codebase
-				const clones = await engine.checkSnippet(fullPath, content);
+				const { clones } = await coordinator.checkAndUpdate(
+					fullPath,
+					content,
+					revision,
+				);
 				const freshClones = ledger.filterFreshClones(relPath, clones);
-
-				// Update engine index with the new file content for subsequent calls
-				await engine.updateFile(fullPath, content);
 
 				if (freshClones.length > 0) {
 					const reminder = ledger.formatReminder(freshClones, relPath, content);
@@ -365,9 +536,6 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 							},
 							{ deliverAs: "steer" },
 						);
-					}
-
-					if (config.reminderMode === "steer") {
 						return;
 					}
 
@@ -393,6 +561,74 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 			}
 		},
 	);
+
+	// Register LLM-callable tool
+	async function executeScan(
+		targetPath: string,
+		options: { minLines?: number; minTokens?: number } = {},
+	): Promise<{
+		clones: IClone[];
+		report: string;
+		configSource: string | null;
+	}> {
+		const projectConfig =
+			targetPath !== currentCwd
+				? await findProjectJscpdConfig(targetPath)
+				: null;
+		const effectiveConfig = projectConfig
+			? resolveConfig(activeRawSettings, projectConfig)
+			: config;
+
+		const minLines =
+			typeof options.minLines === "number"
+				? Math.max(3, options.minLines)
+				: effectiveConfig.minLines;
+
+		const minTokens =
+			typeof options.minTokens === "number"
+				? Math.max(10, options.minTokens)
+				: effectiveConfig.minTokens;
+
+		const combinedIgnores = Array.from(
+			new Set([
+				...config.ignorePatterns,
+				...(effectiveConfig.ignorePatterns || []),
+			]),
+		);
+
+		let clones: IClone[] = [];
+		const isCustomScan =
+			targetPath !== currentCwd ||
+			minLines !== config.minLines ||
+			minTokens !== config.minTokens ||
+			combinedIgnores.length !== config.ignorePatterns.length;
+
+		if (isCustomScan) {
+			clones = await coordinator.scan({
+				targetPath,
+				options: {
+					minLines,
+					minTokens,
+					maxLines: effectiveConfig.maxLines,
+					ignorePatterns: combinedIgnores,
+					formatsExts: effectiveConfig.formatsExts,
+				},
+			});
+		} else {
+			clones = await coordinator.scan();
+		}
+
+		const report = formatReport(clones, targetPath, {
+			minLines,
+			minTokens,
+		});
+
+		return {
+			clones,
+			report,
+			configSource: effectiveConfig.configSource ?? null,
+		};
+	}
 
 	// Register LLM-callable tool
 	pi.registerTool({
@@ -451,36 +687,11 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 					: path.join(ctx.cwd, params.path)
 				: ctx.cwd;
 
-			const projectConfig = params.path
-				? await findProjectJscpdConfig(scanPath)
-				: null;
-			const effectiveConfig = projectConfig
-				? resolveConfig(activeRawSettings, projectConfig)
-				: config;
-
-			const minLines =
-				typeof params.minLines === "number"
-					? Math.max(3, params.minLines)
-					: effectiveConfig.minLines;
-
-			const minTokens =
-				typeof params.minTokens === "number"
-					? Math.max(10, params.minTokens)
-					: effectiveConfig.minTokens;
-
-			const combinedIgnores = Array.from(
-				new Set([
-					...config.ignorePatterns,
-					...(effectiveConfig.ignorePatterns || []),
-				]),
-			);
-
 			try {
-				const scanEngine = createEngineFromConfig(effectiveConfig, {
-					minLines,
-					minTokens,
+				const { clones, report, configSource } = await executeScan(scanPath, {
+					minLines: params.minLines,
+					minTokens: params.minTokens,
 				});
-				await scanEngine.initialize(scanPath, combinedIgnores, signal);
 
 				if (signal?.aborted) {
 					return {
@@ -491,11 +702,6 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 					};
 				}
 
-				const report = scanEngine.formatReport(
-					scanEngine.discoveredClones,
-					scanPath,
-				);
-
 				return {
 					content: [
 						{
@@ -504,10 +710,9 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 						},
 					],
 					details: {
-						clones: scanEngine.discoveredClones,
-						filesIndexed: scanEngine.indexedCount,
+						clones,
 						scanPath,
-						configSource: effectiveConfig.configSource ?? null,
+						configSource,
 					},
 				};
 			} catch (err) {
@@ -558,33 +763,11 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 				}
 			}
 
-			const projectConfig =
-				targetPath !== ctx.cwd
-					? await findProjectJscpdConfig(targetPath)
-					: null;
-			const effectiveConfig = projectConfig
-				? resolveConfig(activeRawSettings, projectConfig)
-				: config;
-
-			const minLines = cliMinLines ?? effectiveConfig.minLines;
-			const minTokens = cliMinTokens ?? effectiveConfig.minTokens;
-			const combinedIgnores = Array.from(
-				new Set([
-					...config.ignorePatterns,
-					...(effectiveConfig.ignorePatterns || []),
-				]),
-			);
-
 			try {
-				const scanEngine = createEngineFromConfig(effectiveConfig, {
-					minLines,
-					minTokens,
+				const { clones, report } = await executeScan(targetPath, {
+					minLines: cliMinLines,
+					minTokens: cliMinTokens,
 				});
-				const count = await scanEngine.initialize(targetPath, combinedIgnores);
-				const report = scanEngine.formatReport(
-					scanEngine.discoveredClones,
-					targetPath,
-				);
 
 				pi.sendMessage(
 					{
@@ -594,15 +777,15 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 						attribution: "user",
 						details: {
 							filePath: targetPath,
-							clones: scanEngine.discoveredClones,
+							clones,
 							content: report,
 						},
 					},
 					{ triggerTurn: false },
 				);
 				ctx.ui.notify(
-					`Duplicate scan finished: ${count} files indexed, ${scanEngine.discoveredClones.length} duplicate clusters found.`,
-					scanEngine.discoveredClones.length > 0 ? "warning" : "info",
+					`Duplicate scan finished: ${clones.length} duplicate cluster${clones.length === 1 ? "" : "s"} found.`,
+					clones.length > 0 ? "warning" : "info",
 				);
 			} catch (err) {
 				const message = err instanceof Error ? err.message : String(err);

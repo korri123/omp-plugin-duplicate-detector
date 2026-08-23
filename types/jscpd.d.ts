@@ -7,6 +7,27 @@ declare module "@jscpd/core" {
 		position?: number;
 	}
 
+	export interface ITokenLocation {
+		line: number;
+		column?: number;
+		position?: number;
+	}
+
+	export interface IToken {
+		type?: string;
+		value?: string;
+		length?: number;
+		format?: string;
+		range: [number, number];
+		loc?: {
+			start: ITokenLocation;
+			end: ITokenLocation;
+		};
+		line?: number;
+		column?: number;
+		position?: number;
+	}
+
 	export interface IDuplication {
 		format?: string;
 		sourceId: string;
@@ -21,15 +42,16 @@ declare module "@jscpd/core" {
 		duplicationA: IDuplication;
 		duplicationB: IDuplication;
 		isNew?: boolean;
+		foundDate?: number;
 	}
 
 	export interface IMapFrame {
 		id: string;
 		sourceId: string;
-		start: IClonePosition;
-		end: IClonePosition;
-		localStart: IClonePosition;
-		localEnd: IClonePosition;
+		start: IToken;
+		end: IToken;
+		localStart?: IClonePosition;
+		localEnd?: IClonePosition;
 	}
 
 	export interface IOptions {
@@ -63,7 +85,7 @@ declare module "@jscpd/core" {
 		getId(): string;
 		getLinesCount(): number;
 		getTokensCount(): number;
-		next(): { done: boolean; value: IMapFrame };
+		next(): IteratorResult<IMapFrame | boolean>;
 	}
 
 	export interface ITokenizer {
