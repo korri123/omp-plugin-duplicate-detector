@@ -1,0 +1,66 @@
+{
+  "name": "omp-plugin-duplicate-detector",
+  "version": "0.1.0",
+  "description": "Code clone and duplication detector plugin for oh-my-pi",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "import": "./src/index.ts",
+      "types": "./src/index.ts"
+    }
+  },
+  "scripts": {
+    "check": "tsc --noEmit",
+    "check:types": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "keywords": [
+    "oh-my-pi",
+    "omp",
+    "omp-plugin",
+    "omp-extension",
+    "duplicate-detector",
+    "code-clone",
+    "refactoring"
+  ],
+  "license": "MIT",
+  "omp": {
+    "name": "duplicate-detector",
+    "description": "Detect duplicate and clone code blocks across your codebase",
+    "extensions": [
+      "./src/index.ts"
+    ],
+    "settings": {
+      "minLines": {
+        "type": "number",
+        "description": "Minimum consecutive lines required to report a duplicate block",
+        "default": 6
+      },
+      "minTokens": {
+        "type": "number",
+        "description": "Minimum token count threshold for code clone detection",
+        "default": 30
+      },
+      "ignorePatterns": {
+        "type": "string",
+        "description": "Comma-separated glob patterns to ignore during duplicate detection",
+        "default": "node_modules/**,dist/**,build/**,.git/**,coverage/**"
+      }
+    }
+  },
+  "devDependencies": {
+    "@oh-my-pi/pi-coding-agent": "link:../oh-my-pi/packages/coding-agent",
+    "@types/bun": "^1.3.0",
+    "typescript": "^5.8.0"
+  },
+  "peerDependencies": {
+    "@oh-my-pi/pi-coding-agent": ">=18.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@oh-my-pi/pi-coding-agent": {
+      "optional": true
+    }
+  }
+}
