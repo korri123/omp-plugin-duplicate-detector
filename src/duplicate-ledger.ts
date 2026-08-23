@@ -6,7 +6,19 @@ import type { IClone } from "@jscpd/core";
 export function cloneIdentity(clone: IClone): string {
 	const a = clone.duplicationA;
 	const b = clone.duplicationB;
-	return `${b.sourceId}:${b.start.line}-${b.end.line}:${a.start.line}-${a.end.line}`;
+	// Use source file + line coordinates + length
+	const len = a.end.line - a.start.line + 1;
+	return `${b.sourceId}:${b.start.line}-${b.end.line}::${a.sourceId}::${len}`;
+}
+
+/**
+ * Extract source code lines between start and end lines (1-indexed).
+ */
+export function extractLineRange(content: string, startLine: number, endLine: number): string {
+	const lines = content.split(/\r?\n/);
+	const start = Math.max(0, startLine - 1);
+	const end = Math.min(lines.length, endLine);
+	return lines.slice(start, end).join("\n");
 }
 
 /**
@@ -44,7 +56,7 @@ export class DuplicateLedger {
 	/**
 	 * Format an in-band <system-reminder> XML block for detected clones.
 	 */
-	formatReminder(clones: IClone[], filePath: string): string {
+	formatReminder(clones: IClone[], filePath: string, targetFileContent?: string): string {
 		if (clones.length === 0) return "";
 
 		let reminder = `<system-reminder reason="code_duplication" file="${filePath}">\n`;
@@ -59,8 +71,10 @@ export class DuplicateLedger {
 			reminder += `### Duplicate #${i + 1} (${linesCount} lines, format: ${clone.format})\n`;
 			reminder += `- Current change: \`${a.sourceId}:${a.start.line}-${a.end.line}\` (lines ${a.start.line} to ${a.end.line})\n`;
 			reminder += `- Pre-existing copy: \`${b.sourceId}:${b.start.line}-${b.end.line}\` (lines ${b.start.line} to ${b.end.line})\n`;
-			if (clone.duplicationA.fragment) {
-				reminder += `\n\`\`\`${clone.format}\n${clone.duplicationA.fragment.trim()}\n\`\`\`\n`;
+
+			const snippet = a.fragment || (targetFileContent ? extractLineRange(targetFileContent, a.start.line, a.end.line) : "");
+			if (snippet.trim()) {
+				reminder += `\n\`\`\`${clone.format}\n${snippet.trim()}\n\`\`\`\n`;
 			}
 			reminder += `\n`;
 		}

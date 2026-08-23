@@ -7,6 +7,22 @@ export * from "./duplicate-ledger";
 export * from "./jscpd-engine";
 export * from "./types";
 
+export interface DuplicateDetectorConfig {
+	minLines: number;
+	minTokens: number;
+	checkOnMutation: boolean;
+	reminderMode: "in-band" | "steer" | "none";
+	ignorePatterns: string[];
+}
+
+const DEFAULT_CONFIG: DuplicateDetectorConfig = {
+	minLines: 5,
+	minTokens: 40,
+	checkOnMutation: true,
+	reminderMode: "in-band",
+	ignorePatterns: [],
+};
+
 /**
  * Main extension factory for oh-my-pi duplicate detector plugin powered by jscpd.
  */
@@ -15,18 +31,29 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 
 	pi.setLabel("Duplicate Detector");
 
+	const config: DuplicateDetectorConfig = { ...DEFAULT_CONFIG };
+
 	const engine = new JscpdIndexManager({
-		minTokens: 40,
-		minLines: 5,
+		minTokens: config.minTokens,
+		minLines: config.minLines,
 	});
 
 	const ledger = new DuplicateLedger();
+
+	// Session lifecycle: reset ledger on branch/switch
+	pi.on("session_switch", async () => {
+		ledger.clear();
+	});
+
+	pi.on("session_branch", async () => {
+		ledger.clear();
+	});
 
 	// Initialize repository index in background on session start
 	pi.on("session_start", async (_event, ctx) => {
 		pi.logger.debug("Duplicate detector initializing workspace index", { cwd: ctx.cwd });
 		try {
-			const count = await engine.initialize(ctx.cwd);
+			const count = await engine.initialize(ctx.cwd, config.ignorePatterns);
 			pi.logger.info("Duplicate detector index ready", { filesIndexed: count });
 		} catch (err) {
 			pi.logger.warn("Duplicate detector background indexing failed", {
@@ -38,6 +65,8 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 	// Intercept write and edit tool executions to detect clones in newly added/modified code
 	pi.on("tool_result", async (event, ctx): Promise<ToolResultEventResult | void> => {
 		if (event.isError) return;
+		if (!config.checkOnMutation) return;
+		if (config.reminderMode === "none") return;
 		if (event.toolName !== "write" && event.toolName !== "edit") return;
 
 		const input = event.input as { path?: string };
@@ -58,7 +87,7 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 
 			// If engine is not yet initialized for this workspace, initialize it now
 			if (!engine.isInitialized) {
-				await engine.initialize(ctx.cwd);
+				await engine.initialize(ctx.cwd, config.ignorePatterns);
 			}
 
 			// Check snippet against existing indexed codebase
@@ -69,12 +98,25 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 			await engine.updateFile(fullPath, content);
 
 			if (freshClones.length > 0) {
-				const reminder = ledger.formatReminder(freshClones, relPath);
+				const reminder = ledger.formatReminder(freshClones, relPath, content);
 
 				pi.logger.info("Duplicates detected on file mutation", {
 					file: relPath,
 					count: freshClones.length,
 				});
+
+				if (config.reminderMode === "steer") {
+					pi.sendMessage(
+						{
+							customType: "duplicate-detector-warning",
+							content: reminder,
+							display: true,
+							attribution: "user",
+						},
+						{ deliverAs: "followUp" },
+					);
+					return;
+				}
 
 				// In-band TTSR-style injection: prepend <system-reminder> to tool result content
 				const originalContent: ToolContentItem[] = Array.isArray(event.content)
@@ -135,21 +177,23 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 				: ctx.cwd;
 
 			const scanEngine = new JscpdIndexManager({
-				minLines: params.minLines ?? 5,
-				minTokens: params.minTokens ?? 40,
+				minLines: params.minLines ?? config.minLines,
+				minTokens: params.minTokens ?? config.minTokens,
 			});
 
-			const filesIndexed = await scanEngine.initialize(scanPath);
+			await scanEngine.initialize(scanPath, config.ignorePatterns);
+			const report = scanEngine.formatReport(scanEngine.discoveredClones, scanPath);
 
 			return {
 				content: [
 					{
 						type: "text",
-						text: `Scanned ${filesIndexed} files in ${path.relative(ctx.cwd, scanPath) || "."}. Jscpd duplicate index ready.`,
+						text: report,
 					},
 				],
 				details: {
-					filesIndexed,
+					clones: scanEngine.discoveredClones,
+					filesIndexed: scanEngine.indexedCount,
 					scanPath,
 				},
 			};
@@ -168,8 +212,8 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 		handler: async (args, ctx) => {
 			ctx.ui.notify("Scanning workspace for duplicate code...", "info");
 
-			let minLines = 5;
-			let minTokens = 40;
+			let minLines = config.minLines;
+			let minTokens = config.minTokens;
 			let targetPath = ctx.cwd;
 
 			const parts = args.trim().split(/\s+/).filter(Boolean);
@@ -189,11 +233,22 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 
 			try {
 				const scanEngine = new JscpdIndexManager({ minLines, minTokens });
-				const count = await scanEngine.initialize(targetPath);
+				const count = await scanEngine.initialize(targetPath, config.ignorePatterns);
+				const report = scanEngine.formatReport(scanEngine.discoveredClones, targetPath);
+
+				pi.sendMessage(
+					{
+						customType: "duplicate-detector-report",
+						content: report,
+						display: true,
+						attribution: "user",
+					},
+					{ triggerTurn: false },
+				);
 
 				ctx.ui.notify(
-					`Duplicate scan finished: ${count} files indexed in ${path.relative(ctx.cwd, targetPath) || "."}.`,
-					"info",
+					`Duplicate scan finished: ${count} files indexed, ${scanEngine.discoveredClones.length} duplicate clusters found.`,
+					scanEngine.discoveredClones.length > 0 ? "warning" : "info",
 				);
 			} catch (err) {
 				const message = err instanceof Error ? err.message : String(err);

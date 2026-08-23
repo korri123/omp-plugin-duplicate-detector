@@ -16,7 +16,7 @@ describe("duplicateDetectorExtension integration", () => {
 		await fs.rm(tempDir, { recursive: true, force: true });
 	});
 
-	it("intercepts write tool_result and injects system reminder when duplicate is written", async () => {
+	it("intercepts write tool_result and injects system reminder with code preview", async () => {
 		// 1. Set up an existing source file in workspace
 		const existingCode = `
 export function validateTransaction(tx: { id: string; amount: number; sender: string }): boolean {
@@ -124,9 +124,22 @@ export function validateTransaction(tx: { id: string; amount: number; sender: st
 		const textItem = firstItem as ToolTextContent;
 		expect(textItem.text).toContain('<system-reminder reason="code_duplication" file="order-validator.ts">');
 		expect(textItem.text).toContain("transaction-validator.ts");
+		expect(textItem.text).toContain("validateTransaction");
 
 		// 6. Test deduplication: subsequent edit with same duplicate should not warn again
 		const secondResult = (await toolResultHandlers[0]!(toolResultEvent, mockCtx)) as ToolResultEventResult | undefined;
 		expect(secondResult).toBeUndefined();
+
+		// 7. Test detect_duplicates tool execute
+		expect(registeredTools.length).toBe(1);
+		const detectTool = registeredTools[0]!;
+		const toolOutcome = await detectTool.execute("call_tool_1", {}, undefined, undefined, mockCtx as ExtensionContext);
+
+		expect(toolOutcome.content.length).toBe(1);
+		const firstToolItem = toolOutcome.content[0] as ToolTextContent;
+		expect(firstToolItem.type).toBe("text");
+		expect(firstToolItem.text).toContain("# Duplicate Code Report");
+		expect(firstToolItem.text).toContain("order-validator.ts");
+		expect(firstToolItem.text).toContain("transaction-validator.ts");
 	});
 });

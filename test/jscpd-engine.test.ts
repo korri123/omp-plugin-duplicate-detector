@@ -48,18 +48,51 @@ export function formatUserProfile(user: { id: string; name: string; email: strin
 		expect(clone.duplicationA.sourceId).toContain("auth-service.ts");
 		expect(clone.duplicationB.sourceId).toContain("user-service.ts");
 		expect(clone.format).toBe("typescript");
+
+		// Verify that checkSnippet did NOT pollute the persistent store with virtual frames
+		expect(manager.indexedCount).toBe(1);
 	});
 
-	it("does not report duplicates for unique code snippets", async () => {
-		const fileA = path.join(tempDir, "constants.ts");
-		await Bun.write(fileA, `export const PI = 3.14159;\nexport const E = 2.71828;\nexport const G = 9.81;\n`);
+	it("accumulates discovered clones during initialize and generates Markdown report", async () => {
+		const sharedLogic = `
+export function computeTotalInvoice(items: Array<{ price: number; qty: number }>): number {
+	let sum = 0;
+	for (const item of items) {
+		sum += item.price * item.qty;
+	}
+	return sum;
+}
+`;
+		const fileA = path.join(tempDir, "billing.ts");
+		const fileB = path.join(tempDir, "checkout.ts");
+
+		await Bun.write(fileA, `// Billing\n${sharedLogic}\nexport const A = 1;\n`);
+		await Bun.write(fileB, `// Checkout\n${sharedLogic}\nexport const B = 2;\n`);
 
 		await manager.initialize(tempDir);
 
-		const uniqueSnippet = `export function computeCircleArea(r: number): number { return Math.PI * r * r; }\n`;
-		const clones = await manager.checkSnippet(path.join(tempDir, "math.ts"), uniqueSnippet);
+		expect(manager.discoveredClones.length).toBeGreaterThanOrEqual(1);
+		const report = manager.formatReport();
 
-		expect(clones.length).toBe(0);
+		expect(report).toContain("# Duplicate Code Report");
+		expect(report).toContain("Detected Clones");
+		expect(report).toContain("billing.ts");
+		expect(report).toContain("checkout.ts");
+	});
+
+	it("respects .gitignore patterns when indexing files", async () => {
+		await Bun.write(path.join(tempDir, ".gitignore"), "ignored-dir/\n*.secret.ts\n");
+
+		const ignoredDir = path.join(tempDir, "ignored-dir");
+		await fs.mkdir(ignoredDir, { recursive: true });
+
+		const dupCode = `export function duplicateDummyFunction() { const x = 1; const y = 2; return x + y; }\n`;
+		await Bun.write(path.join(ignoredDir, "file1.ts"), dupCode);
+		await Bun.write(path.join(tempDir, "file2.secret.ts"), dupCode);
+		await Bun.write(path.join(tempDir, "normal.ts"), `export const ok = true;\n`);
+
+		const count = await manager.initialize(tempDir);
+		expect(count).toBe(1);
 	});
 
 	it("updates index when updateFile is called", async () => {

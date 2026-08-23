@@ -23,7 +23,7 @@ describe("DuplicateLedger", () => {
 
 	it("computes deterministic identity for a clone", () => {
 		const id = cloneIdentity(mockCloneA);
-		expect(id).toBe("src/user.ts:5-15:10-20");
+		expect(id).toBe("src/user.ts:5-15::virtual:src/auth.ts::11");
 	});
 
 	it("filters fresh clones and deduplicates repeated occurrences", () => {
@@ -42,7 +42,7 @@ describe("DuplicateLedger", () => {
 		expect(thirdPass.length).toBe(1);
 	});
 
-	it("formats an XML in-band system reminder block", () => {
+	it("formats an XML in-band system reminder block with line ranges", () => {
 		const ledger = new DuplicateLedger();
 		const reminder = ledger.formatReminder([mockCloneA], "src/auth.ts");
 

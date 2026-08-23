@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { Detector, type IClone, type IMapFrame, type IOptions, type IStore, MemoryStore } from "@jscpd/core";
 import { getFormatByFile, Tokenizer } from "@jscpd/tokenizer";
+import { cloneIdentity } from "./duplicate-ledger";
 
 export interface JscpdEngineOptions {
 	minTokens?: number;
@@ -25,20 +26,91 @@ const DEFAULT_IGNORE = [
 	".turbo",
 	"out",
 	"target",
+	"package-lock.json",
+	"pnpm-lock.yaml",
+	"bun.lock",
+	"bun.lockb",
+	"yarn.lock",
 ];
+
+const MAX_FILE_SIZE_BYTES = 1024 * 1024; // 1 MB limit to avoid freezing on bundles
+
+/**
+ * Isolated overlay store for running non-mutating snippet queries.
+ * Prevents virtual query frames from polluting the persistent MemoryStore.
+ */
+export class IsolatedMemoryStore implements IStore<IMapFrame> {
+	#namespace = "";
+	readonly #baseValues: Record<string, Record<string, IMapFrame>>;
+	readonly #overlayValues: Record<string, Record<string, IMapFrame>> = {};
+
+	constructor(baseValues: Record<string, Record<string, IMapFrame>>) {
+		this.#baseValues = baseValues;
+	}
+
+	namespace(ns: string): void {
+		this.#namespace = ns;
+		this.#overlayValues[ns] = this.#overlayValues[ns] || {};
+	}
+
+	get(key: string): Promise<IMapFrame> {
+		const overlay = this.#overlayValues[this.#namespace];
+		if (overlay && key in overlay) {
+			return Promise.resolve(overlay[key]!);
+		}
+		const base = this.#baseValues[this.#namespace];
+		if (base && key in base) {
+			return Promise.resolve(base[key]!);
+		}
+		return Promise.reject(new Error("not found"));
+	}
+
+	set(key: string, value: IMapFrame): Promise<IMapFrame> {
+		if (!this.#overlayValues[this.#namespace]) {
+			this.#overlayValues[this.#namespace] = {};
+		}
+		this.#overlayValues[this.#namespace]![key] = value;
+		return Promise.resolve(value);
+	}
+
+	close(): void {
+		// No-op for isolated overlay
+	}
+}
+
+/**
+ * Subclass of MemoryStore that allows extracting the underlying namespace map.
+ */
+class ExportableMemoryStore extends MemoryStore<IMapFrame> {
+	getNamespaceValues(): Record<string, Record<string, IMapFrame>> {
+		return this.values;
+	}
+
+	deleteKeys(keys: Array<{ namespace: string; key: string }>): void {
+		const values = this.values;
+		for (const { namespace, key } of keys) {
+			if (values[namespace]) {
+				delete values[namespace][key];
+			}
+		}
+	}
+}
 
 export class JscpdIndexManager {
 	readonly #tokenizer: Tokenizer;
-	readonly #store: IStore<IMapFrame>;
+	readonly #store: ExportableMemoryStore;
 	readonly #options: IOptions;
 	#detector: Detector;
 	#indexedFiles = new Set<string>();
+	#fileTokenKeys = new Map<string, Array<{ namespace: string; key: string }>>();
+	#discoveredClones: IClone[] = [];
 	#initialized = false;
+	#initPromise: Promise<number> | null = null;
 	#rootDir = "";
 
 	constructor(options: JscpdEngineOptions = {}) {
 		this.#tokenizer = new Tokenizer();
-		this.#store = new MemoryStore();
+		this.#store = new ExportableMemoryStore();
 		this.#options = {
 			minTokens: options.minTokens ?? 40,
 			minLines: options.minLines ?? 5,
@@ -60,15 +132,38 @@ export class JscpdIndexManager {
 		return this.#rootDir;
 	}
 
+	get discoveredClones(): IClone[] {
+		return this.#discoveredClones.slice();
+	}
+
 	/**
 	 * Scan and index the workspace directory into the token store.
+	 * Coalesces concurrent initialization requests.
 	 */
 	async initialize(rootDir: string, ignorePatterns?: string[]): Promise<number> {
+		if (this.#initPromise) {
+			return this.#initPromise;
+		}
+
+		this.#initPromise = this.#runInitialize(rootDir, ignorePatterns).finally(() => {
+			this.#initPromise = null;
+		});
+
+		return this.#initPromise;
+	}
+
+	async #runInitialize(rootDir: string, ignorePatterns?: string[]): Promise<number> {
 		this.#rootDir = path.resolve(rootDir);
 		this.#indexedFiles.clear();
+		this.#fileTokenKeys.clear();
+		this.#discoveredClones = [];
 
-		const ignores = ignorePatterns && ignorePatterns.length > 0 ? ignorePatterns : DEFAULT_IGNORE;
-		const files = await this.#collectFiles(this.#rootDir, this.#rootDir, ignores);
+		const gitignorePatterns = await this.#readGitignore(this.#rootDir);
+		const userIgnores = ignorePatterns && ignorePatterns.length > 0 ? ignorePatterns : [];
+		const combinedIgnores = [...new Set([...DEFAULT_IGNORE, ...gitignorePatterns, ...userIgnores])];
+
+		const files = await this.#collectFiles(this.#rootDir, this.#rootDir, combinedIgnores);
+		const seenCloneIds = new Set<string>();
 
 		for (const filePath of files) {
 			const relPath = path.relative(this.#rootDir, filePath);
@@ -76,9 +171,21 @@ export class JscpdIndexManager {
 			if (!format) continue;
 
 			try {
-				const content = await Bun.file(filePath).text();
-				await this.#detector.detect(relPath, content, format);
+				const file = Bun.file(filePath);
+				if (file.size > MAX_FILE_SIZE_BYTES) continue;
+
+				const content = await file.text();
+				const clones = await this.#detector.detect(relPath, content, format);
+
 				this.#indexedFiles.add(relPath);
+
+				for (const clone of clones) {
+					const id = cloneIdentity(clone);
+					if (!seenCloneIds.has(id)) {
+						seenCloneIds.add(id);
+						this.#discoveredClones.push(clone);
+					}
+				}
 			} catch {
 				// Skip unreadable files
 			}
@@ -89,10 +196,14 @@ export class JscpdIndexManager {
 	}
 
 	/**
-	 * Check a code snippet or modified file against the indexed repository.
-	 * Returns clones where duplicationB is an existing repository file.
+	 * Check a code snippet or modified file against the indexed repository without polluting the persistent store.
+	 * Returns clones matching against existing repository files or intra-file duplicates.
 	 */
 	async checkSnippet(targetPath: string, content: string): Promise<IClone[]> {
+		if (this.#initPromise) {
+			await this.#initPromise;
+		}
+
 		const format = getFormatByFile(targetPath, this.#options.formatsExts);
 		if (!format) return [];
 
@@ -102,16 +213,20 @@ export class JscpdIndexManager {
 
 		const virtualId = `virtual:${relPath}`;
 
-		// Query detector
-		const allClones = await this.#detector.detect(virtualId, content, format);
+		// Use an isolated overlay store to avoid polluting the persistent MemoryStore with virtual frames
+		const overlayStore = new IsolatedMemoryStore(this.#store.getNamespaceValues());
+		const queryDetector = new Detector(this.#tokenizer, overlayStore, [], this.#options);
 
-		// Filter clones: duplicationA must be the virtual query and duplicationB an existing file
-		const externalClones = allClones.filter((clone) => {
+		const allClones = await queryDetector.detect(virtualId, content, format);
+
+		// Filter clones:
+		const relevantClones = allClones.filter((clone) => {
 			const isAQuery = clone.duplicationA.sourceId === virtualId;
 			const isBQuery = clone.duplicationB.sourceId === virtualId;
 
+			// 1. Cross-file clone against existing repo file
 			if (isAQuery && !isBQuery) {
-				// Don't report self-match if snippet is comparing to identical location in same file
+				// Avoid identical self-match if file was already indexed and hasn't changed at those lines
 				if (clone.duplicationB.sourceId === relPath) {
 					const rangeA = clone.duplicationA.range;
 					const rangeB = clone.duplicationB.range;
@@ -121,16 +236,27 @@ export class JscpdIndexManager {
 				}
 				return true;
 			}
+
+			// 2. Intra-file clone (duplicate blocks within the same new snippet)
+			if (isAQuery && isBQuery) {
+				return true;
+			}
+
 			return false;
 		});
 
-		return externalClones;
+		return relevantClones;
 	}
 
 	/**
 	 * Update the index when a file is written or edited.
+	 * Evicts stale token frames for the file before re-indexing.
 	 */
 	async updateFile(targetPath: string, content: string): Promise<void> {
+		if (this.#initPromise) {
+			await this.#initPromise;
+		}
+
 		const format = getFormatByFile(targetPath, this.#options.formatsExts);
 		if (!format) return;
 
@@ -138,8 +264,63 @@ export class JscpdIndexManager {
 			? path.relative(this.#rootDir, targetPath)
 			: targetPath;
 
+		// Clear stale frames for this file
+		const oldKeys = this.#fileTokenKeys.get(relPath);
+		if (oldKeys) {
+			this.#store.deleteKeys(oldKeys);
+			this.#fileTokenKeys.delete(relPath);
+		}
+
+		// Re-detect and index
 		await this.#detector.detect(relPath, content, format);
 		this.#indexedFiles.add(relPath);
+	}
+
+	/**
+	 * Format discovered clones into a Markdown report.
+	 */
+	formatReport(clones: IClone[] = this.#discoveredClones, scanPath = this.#rootDir): string {
+		let report = `# Duplicate Code Report\n\n`;
+		report += `- **Indexed Files**: ${this.#indexedFiles.size}\n`;
+		report += `- **Scan Target**: \`${scanPath || "."}\`\n`;
+		report += `- **Duplicate Clusters Found**: ${clones.length}\n\n`;
+
+		if (clones.length === 0) {
+			report += `No duplicate code blocks found matching threshold (minLines: ${this.#options.minLines}, minTokens: ${this.#options.minTokens}).\n`;
+			return report;
+		}
+
+		report += `## Detected Clones\n\n`;
+		for (let i = 0; i < clones.length; i++) {
+			const clone = clones[i]!;
+			const a = clone.duplicationA;
+			const b = clone.duplicationB;
+			const linesCount = a.end.line - a.start.line + 1;
+
+			report += `### Clone #${i + 1} (${linesCount} lines, format: ${clone.format})\n`;
+			report += `- **Location A**: \`${a.sourceId}:${a.start.line}-${a.end.line}\`\n`;
+			report += `- **Location B**: \`${b.sourceId}:${b.start.line}-${b.end.line}\`\n`;
+
+			if (a.fragment) {
+				report += `\n\`\`\`${clone.format}\n${a.fragment.trim()}\n\`\`\`\n`;
+			}
+			report += `\n`;
+		}
+
+		return report;
+	}
+
+	async #readGitignore(rootDir: string): Promise<string[]> {
+		try {
+			const gitignorePath = path.join(rootDir, ".gitignore");
+			const content = await Bun.file(gitignorePath).text();
+			return content
+				.split(/\r?\n/)
+				.map((line) => line.trim())
+				.filter((line) => line.length > 0 && !line.startsWith("#"));
+		} catch {
+			return [];
+		}
 	}
 
 	async #collectFiles(dir: string, baseDir: string, ignorePatterns: string[]): Promise<string[]> {
@@ -179,24 +360,36 @@ export class JscpdIndexManager {
 		const segments = normalized.split("/");
 
 		for (const pattern of ignorePatterns) {
-			const cleanPattern = pattern.trim().replace(/\\/g, "/");
-			if (!cleanPattern) continue;
+			const clean = pattern.trim().replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+			if (!clean) continue;
 
-			if (segments.some((seg) => seg === cleanPattern)) {
+			// Exact segment match (e.g. node_modules, dist, .git)
+			if (segments.includes(clean)) {
 				return true;
 			}
 
-			if (cleanPattern.endsWith("/**")) {
-				const prefix = cleanPattern.slice(0, -3);
+			// Prefix glob (e.g. build/**, out/**)
+			if (clean.endsWith("/**")) {
+				const prefix = clean.slice(0, -3);
 				if (normalized === prefix || normalized.startsWith(`${prefix}/`)) {
 					return true;
 				}
 			}
 
-			if (normalized.includes(cleanPattern)) {
+			// Path suffix or exact path match
+			if (normalized === clean || normalized.endsWith(`/${clean}`)) {
 				return true;
 			}
+
+			// Extension wildcard match (e.g. *.min.js, *.map)
+			if (clean.startsWith("*.")) {
+				const ext = clean.slice(1);
+				if (normalized.endsWith(ext)) {
+					return true;
+				}
+			}
 		}
+
 		return false;
 	}
 }
