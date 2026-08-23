@@ -4,12 +4,31 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { isGeneratedContent, JscpdIndexManager } from "../src/jscpd-engine";
 
+async function setupGitRepo(dir: string): Promise<void> {
+	const init = Bun.spawn(["git", "init", "-b", "main"], { cwd: dir });
+	await init.exited;
+	const name = Bun.spawn(["git", "config", "user.name", "Test User"], {
+		cwd: dir,
+	});
+	await name.exited;
+	const email = Bun.spawn(["git", "config", "user.email", "test@example.com"], {
+		cwd: dir,
+	});
+	await email.exited;
+}
+
+async function gitTrack(dir: string, files: string[] = ["."]): Promise<void> {
+	const add = Bun.spawn(["git", "add", ...files], { cwd: dir });
+	await add.exited;
+}
+
 describe("JscpdIndexManager", () => {
 	let tempDir: string;
 	let manager: JscpdIndexManager;
 
 	beforeEach(async () => {
 		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "jscpd-engine-test-"));
+		await setupGitRepo(tempDir);
 		manager = new JscpdIndexManager({
 			minTokens: 20,
 			minLines: 4,
@@ -18,6 +37,23 @@ describe("JscpdIndexManager", () => {
 
 	afterEach(async () => {
 		await fs.rm(tempDir, { recursive: true, force: true });
+	});
+
+	it("skips baseline indexing when directory is not a Git repository", async () => {
+		const nonGitDir = await fs.mkdtemp(path.join(os.tmpdir(), "non-git-test-"));
+		try {
+			await Bun.write(
+				path.join(nonGitDir, "code.ts"),
+				"export function test() { return 42; }\n",
+			);
+			const count = await manager.initialize(nonGitDir);
+			expect(count).toBe(0);
+			expect(manager.isInitialized).toBe(true);
+			expect(manager.baselineStatus).toBe("skipped_not_git");
+			expect(manager.indexedCount).toBe(0);
+		} finally {
+			await fs.rm(nonGitDir, { recursive: true, force: true });
+		}
 	});
 
 	it("indexes repository files and detects code clones in newly checked snippets", async () => {
@@ -35,10 +71,12 @@ export function formatUserProfile(user: { id: string; name: string; email: strin
 			fileA,
 			`import { db } from "./db";\n${utilCode}\nexport const a = 1;\n`,
 		);
+		await gitTrack(tempDir);
 
 		const indexedCount = await manager.initialize(tempDir);
 		expect(indexedCount).toBe(1);
 		expect(manager.isInitialized).toBe(true);
+		expect(manager.baselineStatus).toBe("complete");
 
 		// Now check a duplicate snippet
 		const targetFile = path.join(tempDir, "auth-service.ts");
@@ -74,6 +112,7 @@ export function computeTotalInvoice(items: Array<{ price: number; qty: number }>
 			fileB,
 			`// Checkout\n${sharedLogic}\nexport const B = 2;\n`,
 		);
+		await gitTrack(tempDir);
 
 		await manager.initialize(tempDir);
 
@@ -86,28 +125,25 @@ export function computeTotalInvoice(items: Array<{ price: number; qty: number }>
 		expect(report).toContain("checkout.ts");
 	});
 
-	it("respects .gitignore patterns when indexing files", async () => {
+	it("only indexes Git-tracked files and ignores untracked files during baseline", async () => {
 		await Bun.write(
-			path.join(tempDir, ".gitignore"),
-			"ignored-dir/\n*.secret.ts\n",
+			path.join(tempDir, "tracked.ts"),
+			"export const tracked = true;\n",
 		);
+		await gitTrack(tempDir);
 
-		const ignoredDir = path.join(tempDir, "ignored-dir");
-		await fs.mkdir(ignoredDir, { recursive: true });
-
-		const dupCode = `export function duplicateDummyFunction() { const x = 1; const y = 2; return x + y; }\n`;
-		await Bun.write(path.join(ignoredDir, "file1.ts"), dupCode);
-		await Bun.write(path.join(tempDir, "file2.secret.ts"), dupCode);
+		// Write untracked file without adding to git
 		await Bun.write(
-			path.join(tempDir, "normal.ts"),
-			`export const ok = true;\n`,
+			path.join(tempDir, "untracked.ts"),
+			"export const untracked = true;\n",
 		);
 
 		const count = await manager.initialize(tempDir);
 		expect(count).toBe(1);
+		expect(manager.indexedCount).toBe(1);
 	});
 
-	it("updates index when updateFile is called", async () => {
+	it("updates index when updateFile is called (Hot Index)", async () => {
 		await manager.initialize(tempDir);
 		expect(manager.indexedCount).toBe(0);
 
@@ -153,6 +189,7 @@ pub fn calculate_invoice_total(items: &[InvoiceItem], tax_rate: f64, discount: f
 
 		await Bun.write(path.join(tempDir, "tax.py"), pyCode);
 		await Bun.write(path.join(tempDir, "tax.rs"), rsCode);
+		await gitTrack(tempDir);
 
 		const count = await manager.initialize(tempDir);
 		expect(count).toBe(2);
@@ -185,30 +222,10 @@ pub fn calculate_invoice_total(items: &[InvoiceItem], tax_rate: f64, discount: f
 			path.join(tempDir, "main.ts"),
 			`export const app = "ready";\n`,
 		);
+		await gitTrack(tempDir);
 
 		const count = await manager.initialize(tempDir);
 		// Only main.ts should be indexed
-		expect(count).toBe(1);
-	});
-
-	it("supports .gitignore negation patterns", async () => {
-		await Bun.write(
-			path.join(tempDir, ".gitignore"),
-			"generated/*\n!generated/keep.ts\n",
-		);
-
-		const genDir = path.join(tempDir, "generated");
-		await fs.mkdir(genDir, { recursive: true });
-		await Bun.write(
-			path.join(genDir, "temp.ts"),
-			"export const temp = true;\n",
-		);
-		await Bun.write(
-			path.join(genDir, "keep.ts"),
-			"export const keep = true;\n",
-		);
-
-		const count = await manager.initialize(tempDir);
 		expect(count).toBe(1);
 	});
 
@@ -218,6 +235,7 @@ pub fn calculate_invoice_total(items: &[InvoiceItem], tax_rate: f64, discount: f
 			path.join(tempDir, "test.spec.ts"),
 			"export const b = 2;\n",
 		);
+		await gitTrack(tempDir);
 
 		const count = await manager.initialize(tempDir, ["*.spec.ts"]);
 		expect(count).toBe(1);
@@ -234,44 +252,30 @@ pub fn calculate_invoice_total(items: &[InvoiceItem], tax_rate: f64, discount: f
 			"export const bundle = 1;\n",
 		);
 		await Bun.write(path.join(srcDir, "index.ts"), "export const app = 2;\n");
+		await gitTrack(tempDir);
 
 		const count = await manager.initialize(tempDir, ["dist"]);
 		expect(count).toBe(1);
 		expect(manager.indexedCount).toBe(1);
 	});
 
-	it("scopes rooted and unrooted rules in nested subdirectories correctly", async () => {
+	it("scopes baseline indexing to subdirectories via `git ls-files --cached -z -- .`", async () => {
 		const pkgDir = path.join(tempDir, "packages", "core");
 		const otherDir = path.join(tempDir, "packages", "other");
-		await fs.mkdir(path.join(pkgDir, "build"), { recursive: true });
-		await fs.mkdir(path.join(pkgDir, "src", "deep"), { recursive: true });
-		await fs.mkdir(path.join(otherDir, "build"), { recursive: true });
-		await fs.mkdir(path.join(otherDir, "src", "deep"), { recursive: true });
+		await fs.mkdir(pkgDir, { recursive: true });
+		await fs.mkdir(otherDir, { recursive: true });
 
-		// Nested .gitignore with rooted rule /build and unrooted rule *.temp.ts
-		await Bun.write(path.join(pkgDir, ".gitignore"), "/build/\n*.temp.ts\n");
+		await Bun.write(path.join(pkgDir, "core.ts"), "export const core = 1;\n");
 		await Bun.write(
-			path.join(pkgDir, "build", "out.ts"),
-			"export const out = 1;\n",
-		);
-		await Bun.write(
-			path.join(pkgDir, "src", "deep", "app.temp.ts"),
-			"export const temp = 1;\n",
-		);
-		await Bun.write(path.join(pkgDir, "index.ts"), "export const index = 1;\n");
-		await Bun.write(
-			path.join(otherDir, "build", "out.ts"),
+			path.join(otherDir, "other.ts"),
 			"export const other = 1;\n",
 		);
-		await Bun.write(
-			path.join(otherDir, "src", "deep", "app.temp.ts"),
-			"export const otherTemp = 1;\n",
-		);
+		await gitTrack(tempDir);
 
-		const count = await manager.initialize(tempDir);
-		// Ignored: pkgDir/build/out.ts and pkgDir/src/deep/app.temp.ts
-		// Kept: pkgDir/index.ts, otherDir/build/out.ts, and otherDir/src/deep/app.temp.ts
-		expect(count).toBe(3);
+		// Initializing manager in pkgDir should only index pkgDir files
+		const count = await manager.initialize(pkgDir);
+		expect(count).toBe(1);
+		expect(manager.indexedCount).toBe(1);
 	});
 
 	it("correctly identifies generated file comment markers via isGeneratedContent", () => {
@@ -330,9 +334,25 @@ export function calculateTax(price: number): number {
 `;
 		await Bun.write(path.join(tempDir, "api-client.ts"), genCode);
 		await Bun.write(path.join(tempDir, "tax.ts"), normalCode);
+		await gitTrack(tempDir);
 
 		const count = await manager.initialize(tempDir);
 		// api-client.ts should be skipped due to DO NOT EDIT header
+		expect(count).toBe(1);
+		expect(manager.indexedCount).toBe(1);
+	});
+
+	it("skips individual oversized files exceeding MAX_FILE_SIZE_BYTES", async () => {
+		// File larger than 100 KiB (110 KiB)
+		const largeContent = `const x = 1;\n${"console.log(1);\n".repeat(8000)}`;
+		await Bun.write(path.join(tempDir, "large.ts"), largeContent);
+		await Bun.write(
+			path.join(tempDir, "normal.ts"),
+			"export const ok = true;\n",
+		);
+		await gitTrack(tempDir);
+
+		const count = await manager.initialize(tempDir);
 		expect(count).toBe(1);
 		expect(manager.indexedCount).toBe(1);
 	});
@@ -358,6 +378,7 @@ export function calculateTax(price: number): number {
 			path.join(tempDir, "index.ts"),
 			"export const ready = true;\n",
 		);
+		await gitTrack(tempDir);
 
 		const count = await manager.initialize(tempDir);
 		expect(count).toBe(1);
@@ -375,6 +396,7 @@ func ProcessOrderBatch(orders []Order, taxRate float64) float64 {
 `;
 		await Bun.write(path.join(tempDir, "order_v1.go"), goCode);
 		await Bun.write(path.join(tempDir, "order_v2.go"), goCode);
+		await gitTrack(tempDir);
 
 		const goCount = await manager.initialize(tempDir);
 		expect(goCount).toBe(2);

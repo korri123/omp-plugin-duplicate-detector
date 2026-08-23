@@ -116,11 +116,30 @@ function createMockHarness(): MockHarness {
 	};
 }
 
+async function setupGitRepo(dir: string): Promise<void> {
+	const init = Bun.spawn(["git", "init", "-b", "main"], { cwd: dir });
+	await init.exited;
+	const name = Bun.spawn(["git", "config", "user.name", "Test User"], {
+		cwd: dir,
+	});
+	await name.exited;
+	const email = Bun.spawn(["git", "config", "user.email", "test@example.com"], {
+		cwd: dir,
+	});
+	await email.exited;
+}
+
+async function gitTrack(dir: string, files: string[] = ["."]): Promise<void> {
+	const add = Bun.spawn(["git", "add", ...files], { cwd: dir });
+	await add.exited;
+}
+
 describe("duplicateDetectorExtension integration", () => {
 	let tempDir: string;
 
 	beforeEach(async () => {
 		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-ext-integration-"));
+		await setupGitRepo(tempDir);
 	});
 
 	afterEach(async () => {
@@ -141,13 +160,14 @@ export function validateTransactionPayload(tx: { id: string; amount: number; sen
 			path.join(tempDir, "transaction-validator.ts"),
 			existingCode,
 		);
+		await gitTrack(tempDir);
 
 		const harness = createMockHarness();
 		duplicateDetectorExtension(harness.api);
 		const mockCtx = await harness.startSession(tempDir);
-
 		// Write new duplicate file
 		await Bun.write(path.join(tempDir, "order-validator.ts"), existingCode);
+		await gitTrack(tempDir);
 
 		const toolResultHandlers = harness.eventHandlers["tool_result"] || [];
 		expect(toolResultHandlers.length).toBe(1);
@@ -216,6 +236,7 @@ export function computeInvoiceTaxes(items: Array<{ price: number; taxRate: numbe
 }
 `;
 		await Bun.write(path.join(tempDir, "invoice-taxes.ts"), existingCode);
+		await gitTrack(tempDir);
 
 		const harness = createMockHarness();
 		duplicateDetectorExtension(harness.api);
@@ -225,7 +246,6 @@ export function computeInvoiceTaxes(items: Array<{ price: number; taxRate: numbe
 		});
 
 		await Bun.write(path.join(tempDir, "receipt-taxes.ts"), existingCode);
-
 		const toolResultHandlers = harness.eventHandlers["tool_result"] || [];
 		const toolResultEvent = {
 			type: "tool_result",
@@ -281,13 +301,12 @@ export function processCustomOrder(order: { id: string; amount: number; user: st
 
 		// Main active file with custom extension
 		await Bun.write(path.join(tempDir, "order-a.customts"), code);
+		await gitTrack(tempDir);
 
 		const harness = createMockHarness();
 		duplicateDetectorExtension(harness.api);
 		const mockCtx = await harness.startSession(tempDir);
-
 		await Bun.write(path.join(tempDir, "order-b.customts"), code);
-
 		const toolResultHandlers = harness.eventHandlers["tool_result"] || [];
 		const toolResultEvent = {
 			type: "tool_result",
@@ -390,6 +409,7 @@ export function simpleHelperFunction(x: number, y: number, z: number): number {
 `;
 		await Bun.write(path.join(subprojectDir, "a.ts"), code);
 		await Bun.write(path.join(subprojectDir, "b.ts"), code);
+		await gitTrack(tempDir);
 
 		const harness = createMockHarness();
 		duplicateDetectorExtension(harness.api);
@@ -432,6 +452,64 @@ export function simpleHelperFunction(x: number, y: number, z: number): number {
 
 		for (const h of harness.eventHandlers["session_switch"] || []) {
 			await h({ type: "session_switch" }, mockCtx2);
+		}
+	});
+
+	it("works in non-git workspaces via hot-index mutation checks", async () => {
+		const nonGitDir = await fs.mkdtemp(
+			path.join(os.tmpdir(), "omp-nongit-integration-"),
+		);
+		try {
+			const code = `
+export function calculateShippingQuote(weight: number, distance: number, express: boolean): number {
+	const baseRate = weight * 1.5;
+	const distanceMultiplier = distance > 500 ? 1.25 : 1.0;
+	const expressFee = express ? 25.0 : 0.0;
+	const total = (baseRate * distanceMultiplier) + expressFee;
+	console.log("Calculated shipping quote:", total);
+	return total;
+}
+`;
+			const harness = createMockHarness();
+			duplicateDetectorExtension(harness.api);
+			const mockCtx = await harness.startSession(nonGitDir);
+			const toolResultHandlers = harness.eventHandlers["tool_result"] || [];
+
+			// First write in non-git workspace
+			await Bun.write(path.join(nonGitDir, "moduleA.ts"), code);
+			await toolResultHandlers[0]!(
+				{
+					type: "tool_result",
+					toolName: "write",
+					toolCallId: "call_m1",
+					input: { path: "moduleA.ts", content: code },
+					content: [{ type: "text", text: "ok" }],
+					isError: false,
+				},
+				mockCtx,
+			);
+
+			// Second write with duplicate code should trigger warning via hot index
+			await Bun.write(path.join(nonGitDir, "moduleB.ts"), code);
+			await toolResultHandlers[0]!(
+				{
+					type: "tool_result",
+					toolName: "write",
+					toolCallId: "call_m2",
+					input: { path: "moduleB.ts", content: code },
+					content: [{ type: "text", text: "ok" }],
+					isError: false,
+				},
+				mockCtx,
+			);
+
+			expect(harness.sentMessages.length).toBe(1);
+			const sent = harness.sentMessages[0]!;
+			const sentMsg = sent.msg as { content?: string };
+			expect(sentMsg.content).toContain("moduleB.ts");
+			expect(sentMsg.content).toContain("moduleA.ts");
+		} finally {
+			await fs.rm(nonGitDir, { recursive: true, force: true });
 		}
 	});
 });
