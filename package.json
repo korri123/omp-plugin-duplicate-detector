@@ -47,6 +47,11 @@
 				"type": "string",
 				"description": "Additional comma-separated glob patterns to ignore during duplicate detection",
 				"default": ""
+			},
+			"maxIndexedFiles": {
+				"type": "number",
+				"description": "Maximum number of source code files to index during baseline initialization",
+				"default": 10000
 			}
 		}
 	},

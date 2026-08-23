@@ -15,6 +15,7 @@ export interface JscpdProjectConfig {
 	mode?: string;
 	crossFormats?: boolean;
 	gitignore?: boolean;
+	maxIndexedFiles?: number;
 	raw?: Record<string, unknown>;
 }
 
@@ -91,6 +92,19 @@ export function normalizeJscpdConfig(
 	} else if (typeof rawMinTokens === "string") {
 		const parsed = Number.parseInt(rawMinTokens, 10);
 		if (!Number.isNaN(parsed)) config.minTokens = Math.max(1, parsed);
+	}
+
+	// maxIndexedFiles / max-indexed-files / max_indexed_files
+	const rawMaxIndexedFiles =
+		raw.maxIndexedFiles ?? raw["max-indexed-files"] ?? raw.max_indexed_files;
+	if (
+		typeof rawMaxIndexedFiles === "number" &&
+		!Number.isNaN(rawMaxIndexedFiles)
+	) {
+		config.maxIndexedFiles = Math.max(1, Math.floor(rawMaxIndexedFiles));
+	} else if (typeof rawMaxIndexedFiles === "string") {
+		const parsed = Number.parseInt(rawMaxIndexedFiles, 10);
+		if (!Number.isNaN(parsed)) config.maxIndexedFiles = Math.max(1, parsed);
 	}
 
 	// threshold

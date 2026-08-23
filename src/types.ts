@@ -45,6 +45,8 @@ export interface DuplicateDetectionOptions {
 	minTokens?: number;
 	/** Normalize variable and function identifiers for Type-2/Type-3 clone detection */
 	normalizeIdentifiers?: boolean;
+	/** Maximum number of source code files to index during baseline initialization */
+	maxIndexedFiles?: number;
 }
 
 export interface DuplicateDetectionResult {

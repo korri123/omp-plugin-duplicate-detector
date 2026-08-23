@@ -85,6 +85,7 @@ Configurable via `.omp/settings.json` or `config.yml`:
 | `minLines` | `number` | `6` | Minimum consecutive lines to trigger a clone report |
 | `minTokens` | `number` | `30` | Minimum token count threshold for a clone block |
 | `ignorePatterns` | `string` | `"node_modules/**,dist/**,..."` | Comma-separated glob patterns to ignore |
+| `maxIndexedFiles` | `number` | `10000` | Maximum number of source code files to index during baseline initialization |
 
 ---
 

@@ -7,6 +7,7 @@ import {
 	getSupportedCodeFormat,
 	isGeneratedContent,
 	JscpdIndexManager,
+	MAX_INDEXED_FILES,
 } from "../src/jscpd-engine";
 
 async function setupGitRepo(dir: string): Promise<void> {
@@ -438,6 +439,29 @@ export function computeInvoiceSummary(lines: Array<{ price: number; quantity: nu
 		expect(manager.discoveredClones.length).toBeGreaterThanOrEqual(1);
 		// Indexing 10 files should take well under 2 seconds
 		expect(duration).toBeLessThan(2000);
+	});
+
+	it("exports MAX_INDEXED_FILES with default value of 10000", () => {
+		expect(MAX_INDEXED_FILES).toBe(10000);
+	});
+
+	it("caps indexing at custom maxIndexedFiles option and reports capped status", async () => {
+		const cappedManager = new JscpdIndexManager({ maxIndexedFiles: 3 });
+		for (let i = 0; i < 6; i++) {
+			await Bun.write(
+				path.join(tempDir, `file_${i}.ts`),
+				`export const num_${i} = ${i};\n`,
+			);
+		}
+		await gitTrack(tempDir);
+
+		const count = await cappedManager.initialize(tempDir);
+		expect(count).toBe(3);
+		expect(cappedManager.indexedCount).toBe(3);
+		expect(cappedManager.baselineStatus).toBe("capped_file_count");
+
+		const report = cappedManager.formatReport();
+		expect(report).toContain("Capped at 3 files limit");
 	});
 });
 describe("createIgnoreFilter", () => {

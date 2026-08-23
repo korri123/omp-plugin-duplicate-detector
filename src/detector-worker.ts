@@ -18,6 +18,7 @@ import {
 	isGeneratedContent,
 	isInsideGitWorkTree,
 	MAX_FILE_SIZE_BYTES,
+	MAX_GIT_PATHS,
 	MAX_INDEXED_FILES,
 	MAX_TOTAL_SOURCE_BYTES,
 } from "./jscpd-engine";
@@ -69,6 +70,7 @@ function areOptionsEqual(a?: WorkspaceOptions, b?: WorkspaceOptions): boolean {
 	if (a.minTokens !== b.minTokens) return false;
 	if (a.minLines !== b.minLines) return false;
 	if (a.maxLines !== b.maxLines) return false;
+	if (a.maxIndexedFiles !== b.maxIndexedFiles) return false;
 	const aIgnores = (a.ignorePatterns ?? []).slice().sort().join(",");
 	const bIgnores = (b.ignorePatterns ?? []).slice().sort().join(",");
 	if (aIgnores !== bIgnores) return false;
@@ -171,9 +173,11 @@ async function runBaselineIndexing(
 			createStatusEvent("indexing", "Enumerating tracked Git files..."),
 		);
 
+		const maxIndexedFiles = options?.maxIndexedFiles ?? MAX_INDEXED_FILES;
 		const trackedFiles = await getTrackedGitFiles(rootDir, {
 			userIgnorePatterns: options?.ignorePatterns,
 			signal,
+			maxPaths: Math.max(MAX_GIT_PATHS, maxIndexedFiles),
 		});
 
 		if (signal.aborted) return { indexedCount: 0, status: "cancelled" };
@@ -196,7 +200,7 @@ async function runBaselineIndexing(
 		for (let i = 0; i < trackedFiles.length; i += BATCH_SIZE) {
 			if (signal.aborted) return { indexedCount, status: "cancelled" };
 
-			if (indexedCount >= MAX_INDEXED_FILES) {
+			if (indexedCount >= maxIndexedFiles) {
 				baselineStatus = "capped_file_count";
 				self.postMessage(
 					createStatusEvent("ready", "Indexed file limit reached"),

@@ -8,6 +8,7 @@ import {
 	parseJsonConfig,
 	parseYamlConfig,
 } from "../src/config-loader";
+import { resolveConfig } from "../src/index";
 
 describe("config-loader", () => {
 	let tempDir: string;
@@ -103,6 +104,22 @@ ignore: ["dist", "build", "coverage"]
 			expect(normalized.ignore).toEqual(["vendor/**", "build/**"]);
 			expect(normalized.formatsExts).toEqual({ csharp: ["cs", "csx"] });
 			expect(normalized.crossFormats).toBe(true);
+		});
+		it("normalizes maxIndexedFiles, max-indexed-files, and max_indexed_files", () => {
+			const normalized1 = normalizeJscpdConfig({
+				maxIndexedFiles: 5000,
+			});
+			expect(normalized1.maxIndexedFiles).toBe(5000);
+
+			const normalized2 = normalizeJscpdConfig({
+				"max-indexed-files": "8000",
+			});
+			expect(normalized2.maxIndexedFiles).toBe(8000);
+
+			const normalized3 = normalizeJscpdConfig({
+				max_indexed_files: 12000,
+			});
+			expect(normalized3.maxIndexedFiles).toBe(12000);
 		});
 
 		it("handles comma-separated string ignore patterns", () => {
@@ -260,6 +277,28 @@ minTokens: 85
 			);
 			const config = await findProjectJscpdConfig(tempDir);
 			expect(config).toBeNull();
+		});
+	});
+
+	describe("resolveConfig", () => {
+		it("parses and validates maxIndexedFiles from rawSettings", () => {
+			const config1 = resolveConfig({ maxIndexedFiles: 15000 });
+			expect(config1.maxIndexedFiles).toBe(15000);
+
+			const config2 = resolveConfig({ maxIndexedFiles: "20000" });
+			expect(config2.maxIndexedFiles).toBe(20000);
+
+			const config3 = resolveConfig({ maxIndexedFiles: -5 });
+			expect(config3.maxIndexedFiles).toBeUndefined();
+
+			const config4 = resolveConfig({}, { maxIndexedFiles: 7500 });
+			expect(config4.maxIndexedFiles).toBe(7500);
+
+			const config5 = resolveConfig(
+				{ maxIndexedFiles: 8500 },
+				{ maxIndexedFiles: 7500 },
+			);
+			expect(config5.maxIndexedFiles).toBe(8500);
 		});
 	});
 });

@@ -16,6 +16,7 @@ import {
 	createIgnoreFilter,
 	isGeneratedContent,
 	JscpdIndexManager,
+	MAX_INDEXED_FILES,
 } from "./jscpd-engine";
 import {
 	DuplicateNotificationComponent,
@@ -39,6 +40,7 @@ export interface DuplicateDetectorConfig {
 	minLines: number;
 	minTokens: number;
 	maxLines?: number;
+	maxIndexedFiles?: number;
 	checkOnMutation: boolean;
 	reminderMode: "in-band" | "steer" | "none";
 	ignorePatterns: string[];
@@ -64,6 +66,7 @@ export function resolveConfig(
 	const baseMinLines = projectConfig?.minLines ?? DEFAULT_CONFIG.minLines;
 	const baseMinTokens = projectConfig?.minTokens ?? DEFAULT_CONFIG.minTokens;
 	const baseMaxLines = projectConfig?.maxLines;
+	const baseMaxIndexedFiles = projectConfig?.maxIndexedFiles;
 	const baseFormatsExts = projectConfig?.formatsExts;
 	const projectIgnores = projectConfig?.ignore ?? [];
 
@@ -80,6 +83,7 @@ export function resolveConfig(
 			minLines: baseMinLines,
 			minTokens: baseMinTokens,
 			maxLines: baseMaxLines,
+			maxIndexedFiles: baseMaxIndexedFiles,
 			checkOnMutation: DEFAULT_CONFIG.checkOnMutation,
 			reminderMode: DEFAULT_CONFIG.reminderMode,
 			ignorePatterns: projectIgnores,
@@ -100,6 +104,20 @@ export function resolveConfig(
 		typeof rawSettings.checkOnMutation === "boolean"
 			? rawSettings.checkOnMutation
 			: DEFAULT_CONFIG.checkOnMutation;
+
+	let maxIndexedFiles: number | undefined = baseMaxIndexedFiles;
+	if (
+		typeof rawSettings.maxIndexedFiles === "number" &&
+		!Number.isNaN(rawSettings.maxIndexedFiles) &&
+		rawSettings.maxIndexedFiles > 0
+	) {
+		maxIndexedFiles = Math.floor(rawSettings.maxIndexedFiles);
+	} else if (typeof rawSettings.maxIndexedFiles === "string") {
+		const parsed = Number.parseInt(rawSettings.maxIndexedFiles, 10);
+		if (!Number.isNaN(parsed) && parsed > 0) {
+			maxIndexedFiles = parsed;
+		}
+	}
 
 	const reminderMode =
 		rawSettings.reminderMode === "steer" ||
@@ -129,6 +147,7 @@ export function resolveConfig(
 		minLines,
 		minTokens,
 		maxLines: baseMaxLines,
+		maxIndexedFiles,
 		checkOnMutation,
 		reminderMode,
 		ignorePatterns: mergedIgnores,
@@ -142,13 +161,18 @@ export function resolveConfig(
  */
 export function createEngineFromConfig(
 	config: DuplicateDetectorConfig,
-	overrides: { minLines?: number; minTokens?: number } = {},
+	overrides: {
+		minLines?: number;
+		minTokens?: number;
+		maxIndexedFiles?: number;
+	} = {},
 ): JscpdIndexManager {
 	return new JscpdIndexManager({
 		minLines: overrides.minLines ?? config.minLines,
 		minTokens: overrides.minTokens ?? config.minTokens,
 		maxLines: config.maxLines,
 		formatsExts: config.formatsExts,
+		maxIndexedFiles: overrides.maxIndexedFiles ?? config.maxIndexedFiles,
 	});
 }
 
@@ -239,6 +263,7 @@ export function formatBaselineMessage(
 	status: BaselineStatus,
 	count: number,
 	cachedCount?: number,
+	maxIndexedFiles?: number,
 ): string {
 	if (status === "skipped_not_git") {
 		return "Duplicate detector: Baseline skipped (not a Git repository; mutation checks active)";
@@ -264,7 +289,8 @@ export function formatBaselineMessage(
 	}
 
 	if (status === "capped_file_count") {
-		return `Duplicate detector: Ready (${formattedCount} ${fileWord} indexed${cacheDetail}, capped at 2,500 file limit)`;
+		const limit = (maxIndexedFiles ?? MAX_INDEXED_FILES).toLocaleString();
+		return `Duplicate detector: Ready (${formattedCount} ${fileWord} indexed${cacheDetail}, capped at ${limit} file limit)`;
 	}
 
 	if (status === "capped_source_bytes") {
@@ -286,8 +312,14 @@ function notifyBaselineStatus(
 	status: BaselineStatus,
 	count: number,
 	cachedCount?: number,
+	maxIndexedFiles?: number,
 ): void {
-	const message = formatBaselineMessage(status, count, cachedCount);
+	const message = formatBaselineMessage(
+		status,
+		count,
+		cachedCount,
+		maxIndexedFiles,
+	);
 	if (!message) return;
 
 	const level: "info" | "warning" =
@@ -376,6 +408,7 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 			status,
 			payload.indexedCount,
 			payload.cachedCount,
+			config.maxIndexedFiles,
 		);
 	});
 

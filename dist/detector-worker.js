@@ -11900,7 +11900,7 @@ import { execFile } from "child_process";
 import * as path from "path";
 var import_ignore = __toESM(require_ignore(), 1);
 var MAX_FILE_SIZE_BYTES = 100 * 1024;
-var MAX_INDEXED_FILES = 2500;
+var MAX_INDEXED_FILES = 1e4;
 var MAX_TOTAL_SOURCE_BYTES = 64 * 1024 * 1024;
 var MAX_GIT_PATHS = 1e4;
 var DEFAULT_NOISE_PATTERNS = [
@@ -13251,6 +13251,8 @@ function areOptionsEqual(a, b) {
     return false;
   if (a.maxLines !== b.maxLines)
     return false;
+  if (a.maxIndexedFiles !== b.maxIndexedFiles)
+    return false;
   const aIgnores = (a.ignorePatterns ?? []).slice().sort().join(",");
   const bIgnores = (b.ignorePatterns ?? []).slice().sort().join(",");
   if (aIgnores !== bIgnores)
@@ -13325,9 +13327,11 @@ async function runBaselineIndexing(rootDir, options, signal) {
       return { indexedCount: 0, status: "skipped_not_git" };
     }
     self.postMessage(createStatusEvent("indexing", "Enumerating tracked Git files..."));
+    const maxIndexedFiles = options?.maxIndexedFiles ?? MAX_INDEXED_FILES;
     const trackedFiles = await getTrackedGitFiles(rootDir, {
       userIgnorePatterns: options?.ignorePatterns,
-      signal
+      signal,
+      maxPaths: Math.max(MAX_GIT_PATHS, maxIndexedFiles)
     });
     if (signal.aborted)
       return { indexedCount: 0, status: "cancelled" };
@@ -13342,7 +13346,7 @@ async function runBaselineIndexing(rootDir, options, signal) {
     for (let i = 0;i < trackedFiles.length; i += BATCH_SIZE) {
       if (signal.aborted)
         return { indexedCount, status: "cancelled" };
-      if (indexedCount >= MAX_INDEXED_FILES) {
+      if (indexedCount >= maxIndexedFiles) {
         baselineStatus = "capped_file_count";
         self.postMessage(createStatusEvent("ready", "Indexed file limit reached"));
         break;

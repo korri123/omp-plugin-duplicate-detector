@@ -294,15 +294,18 @@ describe("formatBaselineMessage: Cache State Formatting", () => {
 		);
 	});
 
-	it("formats capped_file_count with cache detail", () => {
-		expect(formatBaselineMessage("capped_file_count", 2500, 2500)).toBe(
+	it("formats capped_file_count with cache detail and maxIndexedFiles", () => {
+		expect(formatBaselineMessage("capped_file_count", 10000, 10000)).toBe(
+			"Duplicate detector: Ready (10,000 files indexed, cached, capped at 10,000 file limit)",
+		);
+		expect(formatBaselineMessage("capped_file_count", 10000, 0)).toBe(
+			"Duplicate detector: Ready (10,000 files indexed, uncached, capped at 10,000 file limit)",
+		);
+		expect(formatBaselineMessage("capped_file_count", 10000, 1000)).toBe(
+			"Duplicate detector: Ready (10,000 files indexed, 1,000 cached, capped at 10,000 file limit)",
+		);
+		expect(formatBaselineMessage("capped_file_count", 2500, 2500, 2500)).toBe(
 			"Duplicate detector: Ready (2,500 files indexed, cached, capped at 2,500 file limit)",
-		);
-		expect(formatBaselineMessage("capped_file_count", 2500, 0)).toBe(
-			"Duplicate detector: Ready (2,500 files indexed, uncached, capped at 2,500 file limit)",
-		);
-		expect(formatBaselineMessage("capped_file_count", 2500, 1000)).toBe(
-			"Duplicate detector: Ready (2,500 files indexed, 1,000 cached, capped at 2,500 file limit)",
 		);
 	});
 

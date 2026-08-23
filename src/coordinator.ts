@@ -34,6 +34,7 @@ export interface DuplicateDetectorConfig {
 	ignorePatterns?: string[];
 	formatsExts?: Record<string, string[]>;
 	configSource?: string;
+	maxIndexedFiles?: number;
 }
 
 export interface CoordinatorOptions {
@@ -74,6 +75,7 @@ function computeConfigHash(
 		maxLines: config.maxLines,
 		ignorePatterns: (config.ignorePatterns ?? []).slice().sort(),
 		formatsExts: config.formatsExts,
+		maxIndexedFiles: config.maxIndexedFiles,
 	});
 }
 export function resolveDefaultWorkerUrl(): string {
@@ -337,6 +339,7 @@ export class DuplicateDetectorCoordinator extends EventEmitter<CoordinatorEvents
 			maxLines: config?.maxLines,
 			ignorePatterns: config?.ignorePatterns,
 			formatsExts: config?.formatsExts,
+			maxIndexedFiles: config?.maxIndexedFiles,
 		};
 
 		const configHash = computeConfigHash(options);

@@ -19,6 +19,7 @@ export interface WorkspaceOptions {
 	crossFormats?: boolean;
 	cacheDir?: string;
 	maxCacheBytes?: number;
+	maxIndexedFiles?: number;
 }
 
 export interface OpenWorkspacePayload {

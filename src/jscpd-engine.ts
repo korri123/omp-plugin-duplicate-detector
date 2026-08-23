@@ -19,7 +19,10 @@ export interface JscpdEngineOptions {
 	ignorePatterns?: string[];
 	formatsExts?: Record<string, string[]>;
 	crossFormats?: boolean;
+	maxIndexedFiles?: number;
 }
+
+export type JscpdIndexManagerOptions = JscpdEngineOptions;
 
 export type BaselineStatus =
 	| "idle"
@@ -34,7 +37,7 @@ export type BaselineStatus =
 export const MAX_FILE_SIZE_BYTES = 100 * 1024;
 
 /** Hard circuit breaker: Maximum files indexed during baseline initialization */
-export const MAX_INDEXED_FILES = 2500;
+export const MAX_INDEXED_FILES = 10000;
 
 /** Hard circuit breaker: Maximum total source bytes across all indexed files (64 MiB) */
 export const MAX_TOTAL_SOURCE_BYTES = 64 * 1024 * 1024;
@@ -348,7 +351,7 @@ class ExportableMemoryStore extends MemoryStore<IMapFrame> {
 export class JscpdIndexManager {
 	readonly #tokenizer: Tokenizer;
 	readonly #store: ExportableMemoryStore;
-	readonly #options: IOptions;
+	readonly #options: IOptions & { maxIndexedFiles?: number };
 	#detector: Detector;
 	#indexedFiles = new Set<string>();
 	#discoveredClones: IClone[] = [];
@@ -359,7 +362,7 @@ export class JscpdIndexManager {
 	#baselineStatus: BaselineStatus = "idle";
 	#totalSourceBytes = 0;
 
-	constructor(options: JscpdEngineOptions = {}) {
+	constructor(options: JscpdIndexManagerOptions = {}) {
 		this.#tokenizer = new Tokenizer();
 		this.#store = new ExportableMemoryStore();
 		this.#options = {
@@ -367,6 +370,7 @@ export class JscpdIndexManager {
 			minLines: options.minLines ?? 5,
 			maxLines: options.maxLines ?? 500,
 			formatsExts: options.formatsExts,
+			maxIndexedFiles: options.maxIndexedFiles,
 		};
 		this.#detector = new Detector(
 			this.#tokenizer,
@@ -467,10 +471,11 @@ export class JscpdIndexManager {
 
 		const userIgnores =
 			ignorePatterns && ignorePatterns.length > 0 ? ignorePatterns : [];
+		const maxIndexedFiles = this.#options.maxIndexedFiles ?? MAX_INDEXED_FILES;
 		const files = await getTrackedGitFiles(this.#rootDir, {
 			userIgnorePatterns: userIgnores,
 			signal,
-			maxPaths: MAX_GIT_PATHS,
+			maxPaths: Math.max(MAX_GIT_PATHS, maxIndexedFiles),
 		});
 
 		const seenCloneIds = new Set<string>();
@@ -482,7 +487,7 @@ export class JscpdIndexManager {
 				break;
 			}
 
-			if (this.#indexedFiles.size >= MAX_INDEXED_FILES) {
+			if (this.#indexedFiles.size >= maxIndexedFiles) {
 				status = "capped_file_count";
 				break;
 			}
@@ -643,7 +648,8 @@ export class JscpdIndexManager {
 		if (this.#baselineStatus === "skipped_not_git") {
 			report += `- **Baseline Status**: Skipped (Directory is not inside a Git working tree; automatic scan requires Git-tracked files)\n`;
 		} else if (this.#baselineStatus === "capped_file_count") {
-			report += `- **Baseline Status**: Capped at ${MAX_INDEXED_FILES} files limit\n`;
+			const maxFiles = this.#options.maxIndexedFiles ?? MAX_INDEXED_FILES;
+			report += `- **Baseline Status**: Capped at ${maxFiles} files limit\n`;
 		} else if (this.#baselineStatus === "capped_source_bytes") {
 			report += `- **Baseline Status**: Capped at 64 MiB total source size limit\n`;
 		}
