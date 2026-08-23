@@ -130,6 +130,7 @@ interface BatchItem {
 	relPath: string | null;
 	size: number;
 	cachedShard: SerializedSourceShard | null;
+	isNewlyTokenized: boolean;
 	alreadyIndexed: boolean;
 }
 
@@ -240,6 +241,7 @@ async function runBaselineIndexing(
 								relPath: null,
 								size: stat.size,
 								cachedShard: null,
+								isNewlyTokenized: false,
 								alreadyIndexed: true,
 							};
 						}
@@ -261,13 +263,25 @@ async function runBaselineIndexing(
 							? await currentDiskCache.getShard(relPath, contentHash)
 							: null;
 
+						let isNewlyTokenized = false;
+						let shard = cachedShard;
+						if (!shard) {
+							shard = currentIndex.tokenizeSource(
+								filePath,
+								content,
+								contentHash,
+							);
+							isNewlyTokenized = true;
+						}
+
 						return {
 							filePath,
 							content,
 							contentHash,
 							relPath,
 							size: stat.size,
-							cachedShard,
+							cachedShard: shard,
+							isNewlyTokenized,
 							alreadyIndexed: false,
 						};
 					} catch {
@@ -293,7 +307,15 @@ async function runBaselineIndexing(
 				if (item.cachedShard) {
 					item.cachedShard.sourceId = item.filePath;
 					newClones = currentIndex.hydrateSourceShard(item.cachedShard);
-					cachedCount++;
+					if (item.isNewlyTokenized) {
+						if (currentDiskCache && item.contentHash && item.relPath) {
+							currentDiskCache
+								.saveShard(item.cachedShard, item.relPath)
+								.catch(() => {});
+						}
+					} else {
+						cachedCount++;
+					}
 				} else if (item.content) {
 					newClones = currentIndex.addSource(item.filePath, item.content);
 					if (currentDiskCache && item.contentHash && item.relPath) {
@@ -306,7 +328,6 @@ async function runBaselineIndexing(
 						}
 					}
 				}
-
 				indexedCount++;
 				totalSourceBytes += item.size;
 

@@ -39,6 +39,9 @@ export interface SerializedSourceShard {
 	frames: SourceFrame[];
 }
 
+export const fastTokenHash = (val: string): string =>
+	Bun.hash(val).toString(16).padStart(20, "0");
+
 /**
  * Reconstructs sliding window SourceFrames from a pre-tokenized token sequence.
  */
@@ -46,6 +49,7 @@ export function reconstructFramesFromTokens(
 	tokens: SerializedToken[],
 	sourceId: string,
 	minTokens: number,
+	hashFunction: (val: string) => string = fastTokenHash,
 ): SourceFrame[] {
 	const tokenCount = tokens.length;
 	const frameCount = Math.max(0, tokenCount - minTokens);
@@ -58,11 +62,7 @@ export function reconstructFramesFromTokens(
 			i * TOKEN_HASH_LEN,
 			(i + minTokens) * TOKEN_HASH_LEN,
 		);
-		const windowHash = crypto
-			.createHash("md5")
-			.update(windowSub)
-			.digest("hex")
-			.substring(0, TOKEN_HASH_LEN);
+		const windowHash = hashFunction(windowSub).substring(0, TOKEN_HASH_LEN);
 		const startTok = tokens[i]!;
 		const endTok = tokens[i + minTokens]!;
 
@@ -103,6 +103,19 @@ export function reconstructFramesFromTokens(
 	}
 	return frames;
 }
+
+/**
+ * Tokenize a source file into a SerializedSourceShard without modifying index state.
+ */
+export function tokenizeSource(
+	sourceId: string,
+	content: string,
+	contentHash = "",
+	options: SourceAwareIndexOptions = {},
+): SerializedSourceShard | null {
+	const index = new SourceAwareCloneIndex(options);
+	return index.tokenizeSource(sourceId, content, contentHash);
+}
 export interface SourceMeta {
 	sourceId: string;
 	format: string;
@@ -118,6 +131,7 @@ export interface SourceAwareIndexOptions {
 	maxLines?: number;
 	formatsExts?: Record<string, string[]>;
 	crossFormats?: boolean;
+	hashFunction?: (val: string) => string;
 }
 
 export interface IndexStats {
@@ -156,6 +170,7 @@ export class SourceAwareCloneIndex {
 	readonly #minLines: number;
 	readonly #maxLines: number;
 	readonly #formatsExts: Record<string, string[]>;
+	readonly #hashFunction: (val: string) => string;
 
 	constructor(options: SourceAwareIndexOptions = {}) {
 		this.#tokenizer = new Tokenizer();
@@ -163,6 +178,7 @@ export class SourceAwareCloneIndex {
 		this.#minLines = options.minLines ?? 5;
 		this.#maxLines = options.maxLines ?? 500;
 		this.#formatsExts = options.formatsExts ?? {};
+		this.#hashFunction = options.hashFunction ?? fastTokenHash;
 
 		const baseDefaults = getDefaultOptions();
 		this.#options = {
@@ -172,6 +188,7 @@ export class SourceAwareCloneIndex {
 			minLines: this.#minLines,
 			maxLines: this.#maxLines,
 			formatsExts: this.#formatsExts,
+			hashFunction: this.#hashFunction,
 		};
 	}
 
@@ -185,6 +202,10 @@ export class SourceAwareCloneIndex {
 
 	get maxLines(): number {
 		return this.#maxLines;
+	}
+
+	get hashFunction(): (val: string) => string {
+		return this.#hashFunction;
 	}
 
 	get discoveredClones(): IClone[] {
@@ -346,10 +367,10 @@ export class SourceAwareCloneIndex {
 		if (!meta || (!tokens && !frames)) {
 			return null;
 		}
-
 		const minTokens = this.#minTokens;
 		const exportedTokens = tokens ? tokens.slice() : undefined;
 		const fallbackFrames = frames ? frames.slice() : [];
+		const hashFn = this.#hashFunction;
 
 		let memoizedFrames: SourceFrame[] | null =
 			fallbackFrames.length > 0 ? fallbackFrames : null;
@@ -372,6 +393,7 @@ export class SourceAwareCloneIndex {
 							exportedTokens,
 							meta.sourceId,
 							minTokens,
+							hashFn,
 						);
 					} else {
 						memoizedFrames = [];
@@ -382,6 +404,103 @@ export class SourceAwareCloneIndex {
 		};
 	}
 
+	/**
+	 * Tokenize a source file into a SerializedSourceShard without modifying index state.
+	 * Can be run concurrently in parallel batches.
+	 */
+	tokenizeSource(
+		sourceId: string,
+		content: string,
+		contentHash = "",
+		format?: string,
+	): SerializedSourceShard | null {
+		const resolvedFormat =
+			format ?? getSupportedCodeFormat(sourceId, this.#formatsExts);
+		if (!resolvedFormat) {
+			return null;
+		}
+
+		let maps: ITokenMap[];
+		try {
+			maps = this.#tokenizer.generateMaps(
+				sourceId,
+				content,
+				resolvedFormat,
+				this.#options,
+			);
+		} catch {
+			return null;
+		}
+
+		if (!maps || maps.length === 0) {
+			return null;
+		}
+
+		const sourceFrames: SourceFrame[] = [];
+		const sourceTokens: SerializedToken[] = [];
+		const TOKEN_HASH_LEN = 20;
+
+		for (const tokenMap of maps) {
+			const mapTokens = (tokenMap as unknown as { tokens?: unknown[] }).tokens;
+			const hashMap = (tokenMap as unknown as { hashMap?: string }).hashMap;
+
+			if (Array.isArray(mapTokens) && typeof hashMap === "string") {
+				for (let i = 0; i < mapTokens.length; i++) {
+					const t = mapTokens[i] as {
+						line?: number;
+						column?: number;
+						position?: number;
+						range?: [number, number];
+						loc?: { start: { line: number; column: number; position: number } };
+					};
+					const hash = hashMap.substring(
+						i * TOKEN_HASH_LEN,
+						(i + 1) * TOKEN_HASH_LEN,
+					);
+					sourceTokens.push({
+						hash,
+						line: t.loc?.start.line ?? t.line ?? 1,
+						column: t.loc?.start.column ?? t.column ?? 1,
+						position: t.loc?.start.position ?? t.position ?? i,
+						range: t.range ? [t.range[0], t.range[1]] : [0, 0],
+					});
+				}
+			}
+
+			while (true) {
+				const nextResult = tokenMap.next();
+				if (
+					nextResult.done ||
+					!nextResult.value ||
+					typeof nextResult.value === "boolean"
+				) {
+					break;
+				}
+				sourceFrames.push(nextResult.value as SourceFrame);
+			}
+		}
+
+		let totalTokens = 0;
+		let totalLines = 0;
+		for (const map of maps) {
+			totalTokens += map.getTokensCount();
+			totalLines += map.getLinesCount();
+		}
+
+		return {
+			version: 1,
+			sourceId,
+			contentHash,
+			format: resolvedFormat,
+			size: content.length,
+			lines: totalLines || content.split(/\r?\n/).length,
+			tokenCount: totalTokens,
+			minTokens: this.#minTokens,
+			updatedAt: Date.now(),
+			tokens: sourceTokens,
+			frames: sourceFrames,
+		};
+	}
 	/**
 	 * Hydrate a pre-tokenized shard directly into framesByHash, hashesBySource,
 	 * and sources without re-running Tokenizer.
@@ -396,19 +515,20 @@ export class SourceAwareCloneIndex {
 		let normalizedFrames: SourceFrame[];
 		const shardTokens = shard.tokens;
 
-		if (shardTokens && shardTokens.length > 0) {
-			normalizedFrames = reconstructFramesFromTokens(
-				shardTokens,
-				sourceId,
-				this.#minTokens,
-			);
-		} else if (shard.frames && shard.frames.length > 0) {
+		if (shard.frames && shard.frames.length > 0) {
 			normalizedFrames =
-				shard.frames.length === 0 || shard.frames[0]?.sourceId === sourceId
+				shard.frames[0]?.sourceId === sourceId
 					? shard.frames
 					: shard.frames.map((f) =>
 							f.sourceId === sourceId ? f : { ...f, sourceId },
 						);
+		} else if (shardTokens && shardTokens.length > 0) {
+			normalizedFrames = reconstructFramesFromTokens(
+				shardTokens,
+				sourceId,
+				this.#minTokens,
+				this.#hashFunction,
+			);
 		} else {
 			normalizedFrames = [];
 		}
@@ -579,11 +699,40 @@ export class SourceAwareCloneIndex {
 			}
 
 			const candidates = this.framesByHash.get(frameHash);
+
+			// Fast-path bypass when there are no candidate frames and no active clones extending
+			if (!candidates && activeClones.size === 0) {
+				if (insertFrames) {
+					this.#insertFrame(frameHash, normalizedFrame);
+				}
+				continue;
+			}
+
 			const matchedFrames: SourceFrame[] = candidates
 				? Array.isArray(candidates)
 					? candidates
 					: [candidates]
 				: [];
+
+			if (matchedFrames.length === 0 && activeClones.size === 0) {
+				if (insertFrames) {
+					this.#insertFrame(frameHash, normalizedFrame);
+				}
+				continue;
+			}
+
+			if (matchedFrames.length === 0) {
+				for (const active of activeClones.values()) {
+					if (this.#validateClone(active.clone)) {
+						detectedClones.push(active.clone);
+					}
+				}
+				activeClones.clear();
+				if (insertFrames) {
+					this.#insertFrame(frameHash, normalizedFrame);
+				}
+				continue;
+			}
 
 			const nextActiveClones = new Map<string, ActiveCloneCandidate>();
 
@@ -706,10 +855,12 @@ export class SourceAwareCloneIndex {
 				}
 			}
 
-			for (const [key, active] of activeClones.entries()) {
-				if (!nextActiveClones.has(key)) {
-					if (this.#validateClone(active.clone)) {
-						detectedClones.push(active.clone);
+			if (activeClones.size > 0) {
+				for (const [key, active] of activeClones.entries()) {
+					if (!nextActiveClones.has(key)) {
+						if (this.#validateClone(active.clone)) {
+							detectedClones.push(active.clone);
+						}
 					}
 				}
 			}

@@ -408,8 +408,38 @@ func ProcessOrderBatch(orders []Order, taxRate float64) float64 {
 		expect(manager.discoveredClones.length).toBeGreaterThanOrEqual(1);
 		expect(manager.discoveredClones[0]!.format).toBe("go");
 	});
-});
+	it("indexes multi-file repositories with concurrent batch tokenization and accurate clone detection", async () => {
+		const duplicateSnippet = `
+export function computeInvoiceSummary(lines: Array<{ price: number; quantity: number }>, taxRate: number): number {
+	let subtotal = 0;
+	for (const line of lines) {
+		subtotal += line.price * line.quantity;
+	}
+	const tax = subtotal * taxRate;
+	return subtotal + tax;
+}
+`;
+		// Create 10 files, 5 with duplicate snippet and 5 unique
+		for (let i = 0; i < 10; i++) {
+			const content =
+				i % 2 === 0
+					? `// File ${i}\n${duplicateSnippet}\nexport const val_${i} = ${i};\n`
+					: `// Unique file ${i}\nexport function uniqueFn_${i}() { return ${i * 42}; }\n`;
+			await Bun.write(path.join(tempDir, `service_${i}.ts`), content);
+		}
+		await gitTrack(tempDir);
 
+		const startTime = performance.now();
+		const count = await manager.initialize(tempDir);
+		const duration = performance.now() - startTime;
+
+		expect(count).toBe(10);
+		expect(manager.isInitialized).toBe(true);
+		expect(manager.discoveredClones.length).toBeGreaterThanOrEqual(1);
+		// Indexing 10 files should take well under 2 seconds
+		expect(duration).toBeLessThan(2000);
+	});
+});
 describe("createIgnoreFilter", () => {
 	it("ignores default noise patterns such as node_modules, lockfiles, and minified bundles", () => {
 		const filter = createIgnoreFilter();
