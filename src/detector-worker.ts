@@ -8,12 +8,12 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { IClone } from "@jscpd/core";
-import { getFormatByFile } from "@jscpd/tokenizer";
 import { DiskCacheManager } from "./disk-cache";
 import {
 	type BaselineStatus,
 	createIgnoreFilter,
 	execGit,
+	getSupportedCodeFormat,
 	getTrackedGitFiles,
 	isGeneratedContent,
 	isInsideGitWorkTree,
@@ -217,8 +217,8 @@ async function runBaselineIndexing(
 				batch.map(async (filePath): Promise<BatchItem | null> => {
 					if (signal.aborted) return null;
 
-					// Early skip if file format is unsupported by tokenizer
-					if (!getFormatByFile(filePath, options?.formatsExts)) {
+					// Early skip if file format is unsupported by code duplicate detector
+					if (!getSupportedCodeFormat(filePath, options?.formatsExts)) {
 						return null;
 					}
 
@@ -439,7 +439,7 @@ async function runIncrementalGitReconciliation(
 				currentIndex.removeSource(relPath);
 			} else {
 				try {
-					if (!getFormatByFile(fullPath, options?.formatsExts)) {
+					if (!getSupportedCodeFormat(fullPath, options?.formatsExts)) {
 						currentIndex.removeSource(fullPath);
 						continue;
 					}
@@ -645,7 +645,10 @@ async function handleWorkerRequest(msg: WorkerRequestMessage): Promise<void> {
 						reconciledCount++;
 					} else {
 						if (
-							!getFormatByFile(fileEntry.filePath, currentOptions?.formatsExts)
+							!getSupportedCodeFormat(
+								fileEntry.filePath,
+								currentOptions?.formatsExts,
+							)
 						) {
 							currentIndex.removeSource(fileEntry.filePath);
 							continue;
@@ -697,7 +700,8 @@ async function handleWorkerRequest(msg: WorkerRequestMessage): Promise<void> {
 
 					for (const file of filesToScan) {
 						try {
-							if (!getFormatByFile(file, optionsToUse?.formatsExts)) continue;
+							if (!getSupportedCodeFormat(file, optionsToUse?.formatsExts))
+								continue;
 							const stat = await fs.stat(file);
 							if (stat.size <= MAX_FILE_SIZE_BYTES && stat.size > 0) {
 								const content = await fs.readFile(file, "utf8");

@@ -65,6 +65,64 @@ export const DEFAULT_NOISE_PATTERNS = [
 	"node_modules",
 ];
 
+/**
+ * Non-code data, documentation, and metadata formats excluded from default code duplicate analysis.
+ */
+export const DEFAULT_NON_CODE_FORMATS: ReadonlySet<string> = new Set([
+	"diff",
+	"markdown",
+	"txt",
+	"json",
+	"json5",
+	"csv",
+	"log",
+	"excel-formula",
+	"ignore",
+	"git",
+	"asciidoc",
+	"textile",
+	"wiki",
+	"tap",
+	"gettext",
+	"latex",
+	"plant-uml",
+	"mermaid",
+]);
+
+/**
+ * Resolves whether a file corresponds to a supported source code format for duplicate detection.
+ * Filters out non-code documentation, data, logs, and diff formats by default.
+ * If user explicitly maps an extension via formatsExts, user configuration takes precedence.
+ */
+export function getSupportedCodeFormat(
+	filePath: string,
+	formatsExts?: Record<string, string[]>,
+): string | undefined {
+	const format = getFormatByFile(filePath, formatsExts);
+	if (!format) {
+		return undefined;
+	}
+
+	// If user explicitly configured this format under formatsExts, honor user intent
+	if (formatsExts && format in formatsExts) {
+		return format;
+	}
+
+	if (DEFAULT_NON_CODE_FORMATS.has(format)) {
+		return undefined;
+	}
+
+	// Filter out non-code markup data files (e.g. standalone .svg and .xml data files)
+	if (format === "markup") {
+		const ext = path.extname(filePath).toLowerCase();
+		if (ext === ".svg" || ext === ".xml") {
+			return undefined;
+		}
+	}
+
+	return format;
+}
+
 /** Standard generated code header comment markers */
 const GENERATED_HEADER_MARKERS = [
 	/@generated\b/i,
@@ -432,7 +490,10 @@ export class JscpdIndexManager {
 			const relPath = path
 				.relative(this.#rootDir, filePath)
 				.replace(/\\/g, "/");
-			const format = getFormatByFile(filePath, this.#options.formatsExts);
+			const format = getSupportedCodeFormat(
+				filePath,
+				this.#options.formatsExts,
+			);
 			if (!format) continue;
 
 			try {
@@ -479,7 +540,10 @@ export class JscpdIndexManager {
 			await this.#initPromise;
 		}
 
-		const format = getFormatByFile(targetPath, this.#options.formatsExts);
+		const format = getSupportedCodeFormat(
+			targetPath,
+			this.#options.formatsExts,
+		);
 		if (!format) return [];
 
 		const relPath = (
@@ -540,7 +604,10 @@ export class JscpdIndexManager {
 		}
 
 		const mutation = async () => {
-			const format = getFormatByFile(targetPath, this.#options.formatsExts);
+			const format = getSupportedCodeFormat(
+				targetPath,
+				this.#options.formatsExts,
+			);
 			if (!format) return;
 
 			const relPath = (

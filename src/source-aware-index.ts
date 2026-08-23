@@ -13,8 +13,8 @@ import {
 	type ITokenMap,
 	mild,
 } from "@jscpd/core";
-import { getFormatByFile, Tokenizer } from "@jscpd/tokenizer";
-
+import { Tokenizer } from "@jscpd/tokenizer";
+import { getSupportedCodeFormat } from "./jscpd-engine";
 export type SourceFrame = IMapFrame;
 
 export interface SerializedToken {
@@ -537,7 +537,7 @@ export class SourceAwareCloneIndex {
 		format?: string,
 	): TokenMapsResult | null {
 		const resolvedFormat =
-			format ?? getFormatByFile(sourceId, this.#formatsExts);
+			format ?? getSupportedCodeFormat(sourceId, this.#formatsExts);
 		if (!resolvedFormat) {
 			return null;
 		}

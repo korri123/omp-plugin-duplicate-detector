@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import {
 	createIgnoreFilter,
+	getSupportedCodeFormat,
 	isGeneratedContent,
 	JscpdIndexManager,
 } from "../src/jscpd-engine";
@@ -457,5 +458,48 @@ describe("createIgnoreFilter", () => {
 		expect(filter("./src/index.ts")).toBe(false);
 		expect(filter("./dist/bundle.js")).toBe(true);
 		expect(filter("dist\\bundle.js")).toBe(true);
+	});
+});
+
+describe("getSupportedCodeFormat", () => {
+	it("resolves genuine programming languages and code formats", () => {
+		expect(getSupportedCodeFormat("src/app.ts")).toBe("typescript");
+		expect(getSupportedCodeFormat("src/component.tsx")).toBe("tsx");
+		expect(getSupportedCodeFormat("lib/core.rs")).toBe("rust");
+		expect(getSupportedCodeFormat("main.py")).toBe("python");
+		expect(getSupportedCodeFormat("server.go")).toBe("go");
+		expect(getSupportedCodeFormat("native.c")).toBe("c");
+		expect(getSupportedCodeFormat("header.h")).toBe("c-header");
+		expect(getSupportedCodeFormat("App.vue")).toBe("vue");
+		expect(getSupportedCodeFormat("Widget.svelte")).toBe("svelte");
+		expect(getSupportedCodeFormat("algo.zig")).toBe("zig");
+		expect(getSupportedCodeFormat("contract.sol")).toBe("solidity");
+		expect(getSupportedCodeFormat("script.sh")).toBe("bash");
+	});
+
+	it("filters out non-code documentation, data, logs, diffs, and graphic files by default", () => {
+		expect(getSupportedCodeFormat("changes.patch")).toBeUndefined();
+		expect(getSupportedCodeFormat("git.diff")).toBeUndefined();
+		expect(getSupportedCodeFormat("README.md")).toBeUndefined();
+		expect(getSupportedCodeFormat("package.json")).toBeUndefined();
+		expect(getSupportedCodeFormat("data.json5")).toBeUndefined();
+		expect(getSupportedCodeFormat("table.csv")).toBeUndefined();
+		expect(getSupportedCodeFormat("server.log")).toBeUndefined();
+		expect(getSupportedCodeFormat("notes.txt")).toBeUndefined();
+		expect(getSupportedCodeFormat("logo.svg")).toBeUndefined();
+		expect(getSupportedCodeFormat("document.latex")).toBeUndefined();
+	});
+
+	it("respects user explicit overrides in formatsExts", () => {
+		const customFormats = {
+			json: ["customjson"],
+			markdown: ["custommd"],
+		};
+		expect(getSupportedCodeFormat("file.customjson", customFormats)).toBe(
+			"json",
+		);
+		expect(getSupportedCodeFormat("doc.custommd", customFormats)).toBe(
+			"markdown",
+		);
 	});
 });
