@@ -166,4 +166,60 @@ export function calculateTaxAmount(income: number, deduction: number, rate: numb
 		await coordinator.dispose();
 		expect(coordinator.isDisposed).toBe(true);
 	});
+
+	it("unrefs worker and timers so process exits cleanly without hanging", async () => {
+		const proc = Bun.spawn(
+			[
+				"bun",
+				"-e",
+				`
+				import { DuplicateDetectorCoordinator } from "./src/coordinator.ts";
+				const coordinator = new DuplicateDetectorCoordinator();
+				console.log("INITIALIZED");
+			`,
+			],
+			{
+				cwd: path.resolve(__dirname, ".."),
+				stdout: "pipe",
+				stderr: "pipe",
+			},
+		);
+
+		const exitCode = await proc.exited;
+		const stdout = await new Response(proc.stdout).text();
+		expect(exitCode).toBe(0);
+		expect(stdout).toContain("INITIALIZED");
+	});
+
+	it("allows clean process exit when extension factory initializes", async () => {
+		const proc = Bun.spawn(
+			[
+				"bun",
+				"-e",
+				`
+				import extFactory from "./src/index.ts";
+				const mockPi = {
+					setLabel: () => {},
+					on: () => {},
+					registerCommand: () => {},
+					registerTool: () => {},
+					sendMessage: () => {},
+					logger: { info: () => {}, debug: () => {}, warn: () => {}, error: () => {} }
+				};
+				extFactory(mockPi);
+				console.log("FACTORY_INITIALIZED");
+			`,
+			],
+			{
+				cwd: path.resolve(__dirname, ".."),
+				stdout: "pipe",
+				stderr: "pipe",
+			},
+		);
+
+		const exitCode = await proc.exited;
+		const stdout = await new Response(proc.stdout).text();
+		expect(exitCode).toBe(0);
+		expect(stdout).toContain("FACTORY_INITIALIZED");
+	});
 });

@@ -158,6 +158,9 @@ export class DuplicateDetectorCoordinator extends EventEmitter<CoordinatorEvents
 
 		try {
 			const worker = new Worker(this.#workerUrl);
+			if (typeof worker.unref === "function") {
+				worker.unref();
+			}
 
 			worker.onmessage = (event: MessageEvent<unknown>) => {
 				this.#handleWorkerMessage(event.data);
@@ -264,6 +267,9 @@ export class DuplicateDetectorCoordinator extends EventEmitter<CoordinatorEvents
 					).catch(() => {});
 				}
 			}, delay);
+			if (typeof this.#restartTimer.unref === "function") {
+				this.#restartTimer.unref();
+			}
 		}
 	}
 
@@ -300,7 +306,9 @@ export class DuplicateDetectorCoordinator extends EventEmitter<CoordinatorEvents
 				),
 			);
 		}, this.#requestTimeoutMs);
-
+		if (typeof timeoutTimer.unref === "function") {
+			timeoutTimer.unref();
+		}
 		this.#pendingRequests.set(id, {
 			resolve: resolve as (value: unknown) => void,
 			reject,
