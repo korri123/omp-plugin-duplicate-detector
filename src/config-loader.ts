@@ -10,6 +10,9 @@ export interface JscpdProjectConfig {
 	minTokens?: number;
 	threshold?: number;
 	ignore?: string[];
+	ignoreTests?: boolean;
+	customTestPatterns?: string[];
+	excludeTestPatterns?: string[];
 	formatsExts?: Record<string, string[]>;
 	format?: string[];
 	mode?: string;
@@ -185,6 +188,58 @@ export function normalizeJscpdConfig(
 		raw.crossFormats ?? raw["cross-formats"] ?? raw.cross_formats;
 	if (typeof rawCross === "boolean") {
 		config.crossFormats = rawCross;
+	}
+	// ignoreTests / ignore-tests / ignore_tests
+	const rawIgnoreTests =
+		raw.ignoreTests ?? raw["ignore-tests"] ?? raw.ignore_tests;
+	if (typeof rawIgnoreTests === "boolean") {
+		config.ignoreTests = rawIgnoreTests;
+	} else if (typeof rawIgnoreTests === "string") {
+		if (rawIgnoreTests.toLowerCase() === "false") config.ignoreTests = false;
+		else if (rawIgnoreTests.toLowerCase() === "true") config.ignoreTests = true;
+	}
+
+	// customTestPatterns / custom-test-patterns / testPatterns / test-patterns
+	const rawCustomTest =
+		raw.customTestPatterns ??
+		raw["custom-test-patterns"] ??
+		raw.custom_test_patterns ??
+		raw.testPatterns ??
+		raw["test-patterns"] ??
+		raw.test_patterns;
+	if (Array.isArray(rawCustomTest)) {
+		config.customTestPatterns = rawCustomTest
+			.filter(
+				(item): item is string | number => item !== null && item !== undefined,
+			)
+			.map(String)
+			.map((s) => s.trim())
+			.filter((s) => s.length > 0 && s !== "null" && s !== "undefined");
+	} else if (typeof rawCustomTest === "string") {
+		config.customTestPatterns = rawCustomTest
+			.split(",")
+			.map((s) => s.trim())
+			.filter((s) => s.length > 0);
+	}
+
+	// excludeTestPatterns / exclude-test-patterns / exclude_test_patterns
+	const rawExcludeTest =
+		raw.excludeTestPatterns ??
+		raw["exclude-test-patterns"] ??
+		raw.exclude_test_patterns;
+	if (Array.isArray(rawExcludeTest)) {
+		config.excludeTestPatterns = rawExcludeTest
+			.filter(
+				(item): item is string | number => item !== null && item !== undefined,
+			)
+			.map(String)
+			.map((s) => s.trim())
+			.filter((s) => s.length > 0 && s !== "null" && s !== "undefined");
+	} else if (typeof rawExcludeTest === "string") {
+		config.excludeTestPatterns = rawExcludeTest
+			.split(",")
+			.map((s) => s.trim())
+			.filter((s) => s.length > 0);
 	}
 
 	// gitignore

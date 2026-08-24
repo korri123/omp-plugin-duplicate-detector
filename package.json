@@ -46,6 +46,11 @@
 				"description": "Additional comma-separated glob patterns to ignore during duplicate detection",
 				"default": ""
 			},
+			"ignoreTests": {
+				"type": "boolean",
+				"description": "Automatically ignore test files, test directories, mocks, and fixtures across all programming languages",
+				"default": true
+			},
 			"maxIndexedFiles": {
 				"type": "number",
 				"description": "Maximum number of source code files to index during baseline initialization",

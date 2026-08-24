@@ -15,6 +15,9 @@ export interface WorkspaceOptions {
 	minLines?: number;
 	maxLines?: number;
 	ignorePatterns?: string[];
+	ignoreTests?: boolean;
+	customTestPatterns?: string[];
+	excludeTestPatterns?: string[];
 	formatsExts?: Record<string, string[]>;
 	crossFormats?: boolean;
 	cacheDir?: string;

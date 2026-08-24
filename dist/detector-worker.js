@@ -972,7 +972,7 @@ var require_ignore = __commonJS(function(exports, module) {
 // src/detector-worker.ts
 import * as crypto2 from "crypto";
 import * as fs2 from "fs/promises";
-import * as path3 from "path";
+import * as path4 from "path";
 
 // src/disk-cache.ts
 import { Database } from "bun:sqlite";
@@ -980,7 +980,7 @@ import * as crypto from "crypto";
 import * as fsSync from "fs";
 import * as fs from "fs/promises";
 import * as os from "os";
-import * as path2 from "path";
+import * as path3 from "path";
 import * as zlib from "zlib";
 
 // node_modules/eventemitter3/index.mjs
@@ -11897,8 +11897,214 @@ var Tokenizer = class {
 
 // src/jscpd-engine.ts
 import { execFile } from "child_process";
-import * as path from "path";
+import * as path2 from "path";
+var import_ignore2 = __toESM(require_ignore(), 1);
+
+// src/test-detector.ts
 var import_ignore = __toESM(require_ignore(), 1);
+import * as path from "path";
+var DEFAULT_TEST_DIRECTORY_NAMES = {
+  tests: true,
+  testing: true,
+  __test__: true,
+  __tests__: true,
+  spec: true,
+  specs: true,
+  __spec__: true,
+  __specs__: true,
+  __mocks__: true,
+  __fixtures__: true,
+  __snapshots__: true,
+  fixtures: true,
+  fixture: true,
+  mocks: true,
+  mock: true,
+  snapshots: true,
+  snapshot: true,
+  stubs: true,
+  fakes: true,
+  testdata: true,
+  test_data: true,
+  "test-data": true,
+  testfixtures: true,
+  test_fixtures: true,
+  "test-fixtures": true,
+  testsuite: true,
+  testsuites: true,
+  test_suite: true,
+  "test-suite": true,
+  testutils: true,
+  test_utils: true,
+  "test-utils": true,
+  testhelpers: true,
+  test_helpers: true,
+  "test-helpers": true,
+  unittest: true,
+  unittests: true,
+  unit_tests: true,
+  "unit-tests": true,
+  unit_test: true,
+  "unit-test": true,
+  integration_tests: true,
+  "integration-tests": true,
+  integration_test: true,
+  "integration-test": true,
+  functional_tests: true,
+  "functional-tests": true,
+  functional_test: true,
+  "functional-test": true,
+  system_tests: true,
+  "system-tests": true,
+  systemtest: true,
+  systemtests: true,
+  uitests: true,
+  ui_tests: true,
+  "ui-tests": true,
+  e2e: true,
+  "e2e-tests": true,
+  e2e_tests: true,
+  cypress: true,
+  playwright: true,
+  testthat: true,
+  benches: true,
+  benchmarks: true,
+  bdd: true,
+  cucumber: true,
+  step_definitions: true,
+  wiremock: true,
+  contract_tests: true,
+  "contract-tests": true,
+  smoke_tests: true,
+  "smoke-tests": true,
+  acceptance_tests: true,
+  "acceptance-tests": true,
+  googletest: true,
+  gtest: true,
+  catch2: true,
+  doctest: true,
+  testcontainers: true
+};
+var STRUCTURED_TEST_PATH_PATTERNS = [
+  /(?:^|\/)src\/(?:test|it|androidTest|integrationTest|functionalTest|testFixtures|testDebug|testRelease)(?:\/|$)/i,
+  /(?:^|\/)[^/]+\.(?:tests|test|unittests|unittest|integrationtests|integrationtest|specs|spec|functionaltests)(?:\/|$)/i,
+  /(?:^|\/)[^/]+(?:Tests|UITests|UnitTests)(?:\/|$)/,
+  /(?:^|\/)(?:tests?|specs?|testing|test_suite|test_data|testdata|fixtures|mocks|snapshots|e2e|cypress|playwright|googletest|gtest|catch2|doctest)\//i
+];
+var FALSE_POSITIVE_ROOTS = /^(?:at?test(?:ation|ing|ed|s)?|contest(?:ant|ants|ed|ing|s)?|detest(?:able|ed|ing|s)?|protest(?:er|ers|ed|ing|s)?|testament(?:ary|s)?|testosterone|testify|fastest|latest|greatest|smartest|shortest|longest|fittest|neatest|sweetest|brightest|hottest|context|contextual|latent|intestine|intestate)$/i;
+var TEST_FILENAME_PREFIX_REGEX = /^(?:test[_-]|tests[_-]|test\.|tests\.|runtests\.|conftest\.|setupTests\.|setup-tests\.|setup_tests\.|jest\.setup\.|vitest\.setup\.)/i;
+var TEST_SUFFIX_REGEX = /(?:[._-](?:test|tests|spec|specs|cy|e2e|e2e-spec|e2e_spec|integration|unit|unittest|unit_test|integration_test|integration-test|bench|bench_test|benchmark|suite|fixture|fixtures))$/i;
+var PASCAL_TEST_SUFFIX_REGEX = /^[A-Z][A-Za-z0-9_]*(?:Test|Tests|TestCase|TestCases|IT|ITCase|Spec|Specs|Benchmark|Benchmarks)$/;
+var TEST_HELPER_FILENAMES = {
+  "test_helper.rb": true,
+  "spec_helper.rb": true,
+  "rails_helper.rb": true,
+  "test_helper.go": true,
+  "test_helpers.go": true,
+  "test_utils.py": true,
+  "test_util.py": true,
+  "test-utils.ts": true,
+  "test-utils.js": true,
+  "test-utils.tsx": true,
+  "test-utils.jsx": true,
+  "testutils.ts": true,
+  "testutils.js": true,
+  "testutils.tsx": true,
+  "testutils.jsx": true,
+  "conftest.py": true,
+  "setuptests.ts": true,
+  "setuptests.js": true,
+  "setuptests.tsx": true,
+  "setuptests.jsx": true,
+  "jest.setup.ts": true,
+  "jest.setup.js": true,
+  "jest.setup.mjs": true,
+  "jest.setup.cjs": true,
+  "vitest.setup.ts": true,
+  "vitest.setup.js": true,
+  "vitest.setup.mjs": true,
+  "vitest.setup.cjs": true,
+  "test_runner.rb": true,
+  "runtests.jl": true
+};
+var TEST_ONLY_EXTENSIONS = {
+  ".bats": true,
+  ".snap": true,
+  ".snapshot": true
+};
+function isTestFile(filePath, options = {}) {
+  if (options.ignoreTests === false) {
+    return false;
+  }
+  if (!filePath || typeof filePath !== "string") {
+    return false;
+  }
+  const normalized = filePath.trim().replace(/\\/g, "/").replace(/^\.\//, "");
+  if (!normalized || normalized === ".") {
+    return false;
+  }
+  if (options.excludeTestPatterns && options.excludeTestPatterns.length > 0) {
+    try {
+      const excludeFilter = import_ignore.default().add(options.excludeTestPatterns);
+      if (excludeFilter.ignores(normalized)) {
+        return false;
+      }
+    } catch {}
+  }
+  if (options.customTestPatterns && options.customTestPatterns.length > 0) {
+    try {
+      const customFilter = import_ignore.default().add(options.customTestPatterns);
+      if (customFilter.ignores(normalized)) {
+        return true;
+      }
+    } catch {}
+  }
+  const ext = path.extname(normalized).toLowerCase();
+  if (TEST_ONLY_EXTENSIONS[ext]) {
+    return true;
+  }
+  const baseName = path.basename(normalized);
+  const baseNameLower = baseName.toLowerCase();
+  if (TEST_HELPER_FILENAMES[baseNameLower]) {
+    return true;
+  }
+  const segments = normalized.split("/").filter(Boolean);
+  const dirSegments = segments.slice(0, -1);
+  for (const dir of dirSegments) {
+    const dirLower = dir.toLowerCase();
+    if (DEFAULT_TEST_DIRECTORY_NAMES[dirLower]) {
+      return true;
+    }
+  }
+  if (dirSegments.length > 0) {
+    for (const pattern of STRUCTURED_TEST_PATH_PATTERNS) {
+      if (pattern.test(normalized)) {
+        return true;
+      }
+    }
+  }
+  const nameWithoutExt = baseName.slice(0, baseName.length - ext.length);
+  if (!nameWithoutExt) {
+    return false;
+  }
+  if (FALSE_POSITIVE_ROOTS.test(nameWithoutExt)) {
+    return false;
+  }
+  if (TEST_FILENAME_PREFIX_REGEX.test(baseName)) {
+    return true;
+  }
+  if (/^(?:Test|TestCase|IT)[A-Z0-9_]/.test(nameWithoutExt) && !FALSE_POSITIVE_ROOTS.test(nameWithoutExt)) {
+    return true;
+  }
+  if (TEST_SUFFIX_REGEX.test(nameWithoutExt)) {
+    return true;
+  }
+  if (PASCAL_TEST_SUFFIX_REGEX.test(nameWithoutExt) && !FALSE_POSITIVE_ROOTS.test(nameWithoutExt)) {
+    return true;
+  }
+  return false;
+}
+
+// src/jscpd-engine.ts
 var MAX_FILE_SIZE_BYTES = 100 * 1024;
 var MAX_INDEXED_FILES = 1e4;
 var MAX_TOTAL_SOURCE_BYTES = 64 * 1024 * 1024;
@@ -11981,7 +12187,7 @@ function getSupportedCodeFormat(filePath, formatsExts) {
     return;
   }
   if (format === "markup") {
-    const ext = path.extname(filePath).toLowerCase();
+    const ext = path2.extname(filePath).toLowerCase();
     if (ext === ".svg" || ext === ".xml" || ext === ".xsl" || ext === ".xslt") {
       return;
     }
@@ -12016,16 +12222,20 @@ function isGeneratedContent(content) {
   const head = content.slice(0, 2048);
   return GENERATED_HEADER_MARKERS.some((pattern) => pattern.test(head));
 }
-function createIgnoreFilter(userIgnorePatterns = []) {
-  const ig = import_ignore.default().add(DEFAULT_NOISE_PATTERNS).add(userIgnorePatterns);
+function createIgnoreFilter(userIgnorePatterns = [], options = {}) {
+  const ig = import_ignore2.default().add(DEFAULT_NOISE_PATTERNS).add(userIgnorePatterns);
+  const shouldIgnoreTests = options.ignoreTests !== false;
   return (relPath) => {
     if (!relPath || typeof relPath !== "string")
       return false;
     const normalized = relPath.trim().replace(/\\/g, "/").replace(/^\.\//, "");
     if (!normalized || normalized === ".")
       return false;
-    if (normalized.startsWith("../") || normalized === ".." || normalized.startsWith("/") || path.isAbsolute(normalized)) {
+    if (normalized.startsWith("../") || normalized === ".." || normalized.startsWith("/") || path2.isAbsolute(normalized)) {
       return false;
+    }
+    if (shouldIgnoreTests && isTestFile(normalized, options)) {
+      return true;
     }
     try {
       return ig.ignores(normalized);
@@ -12047,7 +12257,11 @@ async function getTrackedGitFiles(rootDir, options = {}) {
     return [];
   }
   const maxPaths = options.maxPaths ?? MAX_GIT_PATHS;
-  const baseIgnore = import_ignore.default().add(DEFAULT_NOISE_PATTERNS).add(options.userIgnorePatterns ?? []);
+  const ignoreFilter = createIgnoreFilter(options.userIgnorePatterns ?? [], {
+    ignoreTests: options.ignoreTests,
+    customTestPatterns: options.customTestPatterns,
+    excludeTestPatterns: options.excludeTestPatterns
+  });
   try {
     const { stdout } = await execGit(["ls-files", "--cached", "-z", "--", "."], rootDir, {
       signal: options.signal,
@@ -12064,14 +12278,12 @@ async function getTrackedGitFiles(rootDir, options = {}) {
       if (results.length >= maxPaths)
         break;
       const relPath = trimmed.replace(/\\/g, "/").replace(/^\.\//, "");
-      if (!relPath || relPath === ".." || relPath.startsWith("../") || relPath.startsWith("/") || path.isAbsolute(relPath)) {
+      if (!relPath || relPath === ".." || relPath.startsWith("../") || relPath.startsWith("/") || path2.isAbsolute(relPath)) {
         continue;
       }
-      try {
-        if (baseIgnore.ignores(relPath))
-          continue;
-      } catch {}
-      results.push(path.resolve(rootDir, trimmed));
+      if (ignoreFilter(relPath))
+        continue;
+      results.push(path2.resolve(rootDir, trimmed));
     }
     return results;
   } catch {
@@ -12639,15 +12851,15 @@ function getDefaultCacheDir() {
   if (process.platform === "win32") {
     const localAppData = process.env.LOCALAPPDATA;
     if (localAppData) {
-      return path2.join(localAppData, "omp", "duplicate-detector");
+      return path3.join(localAppData, "omp", "duplicate-detector");
     }
-    return path2.join(os.homedir(), "AppData", "Local", "omp", "duplicate-detector");
+    return path3.join(os.homedir(), "AppData", "Local", "omp", "duplicate-detector");
   }
   const xdgCacheHome = process.env.XDG_CACHE_HOME;
   if (xdgCacheHome) {
-    return path2.join(xdgCacheHome, "omp", "duplicate-detector");
+    return path3.join(xdgCacheHome, "omp", "duplicate-detector");
   }
-  return path2.join(os.homedir(), ".cache", "omp", "duplicate-detector");
+  return path3.join(os.homedir(), ".cache", "omp", "duplicate-detector");
 }
 function computeConfigFingerprint(config) {
   if (!config)
@@ -12669,9 +12881,9 @@ function computeConfigFingerprint(config) {
   return crypto.createHash("sha256").update(JSON.stringify(canonical)).digest("hex").slice(0, 16);
 }
 function computeWorkspaceCachePath(baseDir, rootDir, configFingerprint) {
-  const canonicalPath = path2.resolve(rootDir);
+  const canonicalPath = path3.resolve(rootDir);
   const workspaceHash = crypto.createHash("sha256").update(canonicalPath).digest("hex").slice(0, 16);
-  return path2.join(baseDir, `${workspaceHash}_${configFingerprint}.sqlite`);
+  return path3.join(baseDir, `${workspaceHash}_${configFingerprint}.sqlite`);
 }
 var CACHE_FORMAT_MAGIC = "DUP3";
 var CACHE_FORMAT_VERSION = 3;
@@ -12878,8 +13090,8 @@ class DiskCacheManager {
   #deleteAllStmt = null;
   #closed = false;
   constructor(options) {
-    this.rootDir = path2.resolve(options.rootDir);
-    this.baseCacheDir = options.cacheDir ? path2.resolve(options.cacheDir) : getDefaultCacheDir();
+    this.rootDir = path3.resolve(options.rootDir);
+    this.baseCacheDir = options.cacheDir ? path3.resolve(options.cacheDir) : getDefaultCacheDir();
     this.configFingerprint = computeConfigFingerprint(options.config);
     this.dbPath = computeWorkspaceCachePath(this.baseCacheDir, this.rootDir, this.configFingerprint);
     this.workspaceCacheDir = this.baseCacheDir;
@@ -12891,7 +13103,7 @@ class DiskCacheManager {
     if (this.#db)
       return this.#db;
     try {
-      const dir = path2.dirname(this.dbPath);
+      const dir = path3.dirname(this.dbPath);
       if (!fsSync.existsSync(dir)) {
         fsSync.mkdirSync(dir, { recursive: true });
       }
@@ -12966,7 +13178,7 @@ class DiskCacheManager {
       const db = this.#getDb();
       if (!db || !this.#saveStmt)
         return;
-      const targetRelPath = relPath ?? (path2.isAbsolute(shard.sourceId) ? path2.relative(this.rootDir, shard.sourceId) : shard.sourceId);
+      const targetRelPath = relPath ?? (path3.isAbsolute(shard.sourceId) ? path3.relative(this.rootDir, shard.sourceId) : shard.sourceId);
       const normalizedRelPath = targetRelPath.replace(/\\/g, "/");
       const payload = packBinaryShard(shard);
       this.#saveStmt.run(normalizedRelPath, shard.contentHash, payload, Date.now());
@@ -13129,6 +13341,16 @@ function areOptionsEqual(a, b) {
     return false;
   if (a.maxIndexedFiles !== b.maxIndexedFiles)
     return false;
+  if (a.ignoreTests !== b.ignoreTests)
+    return false;
+  const aCustom = (a.customTestPatterns ?? []).slice().sort().join(",");
+  const bCustom = (b.customTestPatterns ?? []).slice().sort().join(",");
+  if (aCustom !== bCustom)
+    return false;
+  const aExclude = (a.excludeTestPatterns ?? []).slice().sort().join(",");
+  const bExclude = (b.excludeTestPatterns ?? []).slice().sort().join(",");
+  if (aExclude !== bExclude)
+    return false;
   const aIgnores = (a.ignorePatterns ?? []).slice().sort().join(",");
   const bIgnores = (b.ignorePatterns ?? []).slice().sort().join(",");
   if (aIgnores !== bIgnores)
@@ -13145,8 +13367,8 @@ function notifyLateFindings(clones) {
   for (const clone2 of clones) {
     const srcA = clone2.duplicationA.sourceId;
     const srcB = clone2.duplicationB.sourceId;
-    const resA = path3.resolve(srcA);
-    const resB = path3.resolve(srcB);
+    const resA = path4.resolve(srcA);
+    const resB = path4.resolve(srcB);
     const isWatchedA = watchedRevisions.has(srcA) || watchedRevisions.has(resA);
     const isWatchedB = watchedRevisions.has(srcB) || watchedRevisions.has(resB);
     if (isWatchedA || isWatchedB) {
@@ -13168,7 +13390,7 @@ function cacheSourceShard(filePath, content) {
   if (!currentDiskCache)
     return;
   const contentHash = crypto2.createHash("sha256").update(content).digest("hex");
-  const relPath = path3.relative(currentRootDir, filePath).replace(/\\/g, "/");
+  const relPath = path4.relative(currentRootDir, filePath).replace(/\\/g, "/");
   const shard = currentIndex.exportSourceShard(filePath, contentHash);
   if (shard) {
     currentDiskCache.saveShard(shard, relPath).catch(() => {});
@@ -13206,6 +13428,9 @@ async function runBaselineIndexing(rootDir, options, signal) {
     const maxIndexedFiles = options?.maxIndexedFiles ?? MAX_INDEXED_FILES;
     const trackedFiles = await getTrackedGitFiles(rootDir, {
       userIgnorePatterns: options?.ignorePatterns,
+      ignoreTests: options?.ignoreTests,
+      customTestPatterns: options?.customTestPatterns,
+      excludeTestPatterns: options?.excludeTestPatterns,
       signal,
       maxPaths: Math.max(MAX_GIT_PATHS, maxIndexedFiles)
     });
@@ -13244,7 +13469,7 @@ async function runBaselineIndexing(rootDir, options, signal) {
           if (stat2.size > MAX_FILE_SIZE_BYTES || stat2.size <= 0) {
             return null;
           }
-          const resolved = path3.resolve(filePath);
+          const resolved = path4.resolve(filePath);
           if (currentIndex.hasSource(filePath) || currentIndex.hasSource(resolved)) {
             return {
               filePath,
@@ -13262,7 +13487,7 @@ async function runBaselineIndexing(rootDir, options, signal) {
             return null;
           }
           const contentHash = crypto2.createHash("sha256").update(content).digest("hex");
-          const relPath = path3.relative(rootDir, filePath).replace(/\\/g, "/");
+          const relPath = path4.relative(rootDir, filePath).replace(/\\/g, "/");
           const cachedShard = currentDiskCache ? await currentDiskCache.getShard(relPath, contentHash) : null;
           let isNewlyTokenized = false;
           let shard = cachedShard;
@@ -13375,7 +13600,11 @@ async function runIncrementalGitReconciliation(rootDir, options, signal) {
         status: !isGit ? "skipped_not_git" : "complete"
       };
     }
-    const ignoreFilter = createIgnoreFilter(options?.ignorePatterns);
+    const ignoreFilter = createIgnoreFilter(options?.ignorePatterns, {
+      ignoreTests: options?.ignoreTests,
+      customTestPatterns: options?.customTestPatterns,
+      excludeTestPatterns: options?.excludeTestPatterns
+    });
     const { stdout } = await execGit(["status", "--porcelain", "-z", "--", "."], rootDir, { signal });
     if (signal.aborted)
       return {
@@ -13402,12 +13631,12 @@ async function runIncrementalGitReconciliation(rootDir, options, signal) {
         const oldRelPath = entries[i]?.trim();
         i++;
         if (oldRelPath) {
-          const oldFullPath = path3.resolve(rootDir, oldRelPath);
+          const oldFullPath = path4.resolve(rootDir, oldRelPath);
           currentIndex.removeSource(oldFullPath);
           currentIndex.removeSource(oldRelPath);
         }
       }
-      const fullPath = path3.resolve(rootDir, relPath);
+      const fullPath = path4.resolve(rootDir, relPath);
       if (ignoreFilter(relPath)) {
         currentIndex.removeSource(fullPath);
         currentIndex.removeSource(relPath);
@@ -13534,9 +13763,9 @@ async function handleWorkerRequest(msg) {
     case "checkAndUpdate": {
       const { filePath, content, format, revision = 1 } = msg.payload;
       const clones = currentIndex.updateSource(filePath, content, format);
-      const resolvedPath = path3.resolve(filePath);
+      const resolvedPath = path4.resolve(filePath);
       cacheSourceShard(filePath, content);
-      const fileClones = clones.filter((c) => c.duplicationA.sourceId === filePath || c.duplicationB.sourceId === filePath || path3.resolve(c.duplicationA.sourceId) === resolvedPath || path3.resolve(c.duplicationB.sourceId) === resolvedPath);
+      const fileClones = clones.filter((c) => c.duplicationA.sourceId === filePath || c.duplicationB.sourceId === filePath || path4.resolve(c.duplicationA.sourceId) === resolvedPath || path4.resolve(c.duplicationB.sourceId) === resolvedPath);
       const watchEntry = {
         revision,
         lastKnownCloneCount: fileClones.length
@@ -13611,7 +13840,10 @@ async function handleWorkerRequest(msg) {
           });
           if (isGit) {
             const gitFiles = await getTrackedGitFiles(pathToScan, {
-              userIgnorePatterns: optionsToUse?.ignorePatterns
+              userIgnorePatterns: optionsToUse?.ignorePatterns,
+              ignoreTests: optionsToUse?.ignoreTests,
+              customTestPatterns: optionsToUse?.customTestPatterns,
+              excludeTestPatterns: optionsToUse?.excludeTestPatterns
             });
             filesToScan.push(...gitFiles);
           }

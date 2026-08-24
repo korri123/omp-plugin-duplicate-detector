@@ -32,6 +32,9 @@ export interface DuplicateDetectorConfig {
 	checkOnMutation?: boolean;
 	reminderMode?: "in-band" | "steer" | "none";
 	ignorePatterns?: string[];
+	ignoreTests?: boolean;
+	customTestPatterns?: string[];
+	excludeTestPatterns?: string[];
 	formatsExts?: Record<string, string[]>;
 	configSource?: string;
 	maxIndexedFiles?: number;
@@ -74,6 +77,9 @@ function computeConfigHash(
 		minLines: config.minLines,
 		maxLines: config.maxLines,
 		ignorePatterns: (config.ignorePatterns ?? []).slice().sort(),
+		ignoreTests: config.ignoreTests,
+		customTestPatterns: (config.customTestPatterns ?? []).slice().sort(),
+		excludeTestPatterns: (config.excludeTestPatterns ?? []).slice().sort(),
 		formatsExts: config.formatsExts,
 		maxIndexedFiles: config.maxIndexedFiles,
 	});

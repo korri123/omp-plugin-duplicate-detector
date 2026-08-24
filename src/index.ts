@@ -33,6 +33,9 @@ export interface DuplicateDetectorConfig {
 	checkOnMutation: boolean;
 	reminderMode: "in-band" | "steer" | "none";
 	ignorePatterns: string[];
+	ignoreTests: boolean;
+	customTestPatterns?: string[];
+	excludeTestPatterns?: string[];
 	formatsExts?: Record<string, string[]>;
 	configSource?: string;
 }
@@ -43,6 +46,7 @@ const DEFAULT_CONFIG: DuplicateDetectorConfig = {
 	checkOnMutation: true,
 	reminderMode: "steer",
 	ignorePatterns: [],
+	ignoreTests: true,
 };
 
 /**
@@ -57,6 +61,10 @@ export function resolveConfig(
 	const baseMaxLines = projectConfig?.maxLines;
 	const baseMaxIndexedFiles = projectConfig?.maxIndexedFiles;
 	const baseFormatsExts = projectConfig?.formatsExts;
+	const baseIgnoreTests =
+		projectConfig?.ignoreTests ?? DEFAULT_CONFIG.ignoreTests;
+	const baseCustomTestPatterns = projectConfig?.customTestPatterns;
+	const baseExcludeTestPatterns = projectConfig?.excludeTestPatterns;
 	const projectIgnores = projectConfig?.ignore ?? [];
 
 	let configSource: string | undefined;
@@ -76,6 +84,9 @@ export function resolveConfig(
 			checkOnMutation: DEFAULT_CONFIG.checkOnMutation,
 			reminderMode: DEFAULT_CONFIG.reminderMode,
 			ignorePatterns: projectIgnores,
+			ignoreTests: baseIgnoreTests,
+			customTestPatterns: baseCustomTestPatterns,
+			excludeTestPatterns: baseExcludeTestPatterns,
 			formatsExts: baseFormatsExts,
 			configSource,
 		};
@@ -128,6 +139,49 @@ export function resolveConfig(
 			.filter(Boolean);
 	}
 
+	let ignoreTests = baseIgnoreTests;
+	if (typeof rawSettings.ignoreTests === "boolean") {
+		ignoreTests = rawSettings.ignoreTests;
+	} else if (typeof rawSettings.ignoreTests === "string") {
+		if (rawSettings.ignoreTests.toLowerCase() === "false") {
+			ignoreTests = false;
+		} else if (rawSettings.ignoreTests.toLowerCase() === "true") {
+			ignoreTests = true;
+		}
+	}
+
+	let userCustomTests: string[] = [];
+	if (typeof rawSettings.customTestPatterns === "string") {
+		userCustomTests = rawSettings.customTestPatterns
+			.split(",")
+			.map((p) => p.trim())
+			.filter((p) => p.length > 0);
+	} else if (Array.isArray(rawSettings.customTestPatterns)) {
+		userCustomTests = rawSettings.customTestPatterns
+			.map(String)
+			.map((p) => p.trim())
+			.filter(Boolean);
+	}
+	const mergedCustomTests = Array.from(
+		new Set([...(baseCustomTestPatterns ?? []), ...userCustomTests]),
+	);
+
+	let userExcludeTests: string[] = [];
+	if (typeof rawSettings.excludeTestPatterns === "string") {
+		userExcludeTests = rawSettings.excludeTestPatterns
+			.split(",")
+			.map((p) => p.trim())
+			.filter((p) => p.length > 0);
+	} else if (Array.isArray(rawSettings.excludeTestPatterns)) {
+		userExcludeTests = rawSettings.excludeTestPatterns
+			.map(String)
+			.map((p) => p.trim())
+			.filter(Boolean);
+	}
+	const mergedExcludeTests = Array.from(
+		new Set([...(baseExcludeTestPatterns ?? []), ...userExcludeTests]),
+	);
+
 	const mergedIgnores = Array.from(
 		new Set([...projectIgnores, ...userIgnores]),
 	);
@@ -140,6 +194,11 @@ export function resolveConfig(
 		checkOnMutation,
 		reminderMode,
 		ignorePatterns: mergedIgnores,
+		ignoreTests,
+		customTestPatterns:
+			mergedCustomTests.length > 0 ? mergedCustomTests : undefined,
+		excludeTestPatterns:
+			mergedExcludeTests.length > 0 ? mergedExcludeTests : undefined,
 		formatsExts: baseFormatsExts,
 		configSource,
 	};
@@ -535,10 +594,13 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 			}
 
 			try {
-				// Skip ignored files (matching ignore patterns or noise files)
-				const ignoreFilter = createIgnoreFilter(config.ignorePatterns);
+				// Skip ignored files (matching ignore patterns, noise files, or test files)
+				const ignoreFilter = createIgnoreFilter(config.ignorePatterns, {
+					ignoreTests: config.ignoreTests,
+					customTestPatterns: config.customTestPatterns,
+					excludeTestPatterns: config.excludeTestPatterns,
+				});
 				if (ignoreFilter(normalizedRelPath)) return;
-
 				const file = Bun.file(fullPath);
 				if (!(await file.exists())) return;
 

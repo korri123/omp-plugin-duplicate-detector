@@ -393,14 +393,14 @@ export function sharedUtilitiesHelper(input: string): string[] {
 		);
 		// Simulate tool_result file write
 		const toolHandlers = harness.eventHandlers.tool_result || [];
-		const testFilePath = path.join(tempDir, "mutated_test.ts");
+		const testFilePath = path.join(tempDir, "mutated_module_1.ts");
 		await fs.writeFile(testFilePath, sharedCode);
 
 		for (const handler of toolHandlers) {
 			await handler(
 				{
 					toolName: "write",
-					input: { path: "mutated_test.ts" },
+					input: { path: "mutated_module_1.ts" },
 					isError: false,
 					content: "File written",
 				},
@@ -418,21 +418,20 @@ export function sharedUtilitiesHelper(input: string): string[] {
 		expect(harness.sentMessages.length).toBeGreaterThanOrEqual(1);
 
 		// Trigger another tool_result write after switch
-		const testFilePath2 = path.join(tempDir, "mutated_test_2.ts");
+		const testFilePath2 = path.join(tempDir, "mutated_module_2.ts");
 		await fs.writeFile(testFilePath2, sharedCode);
 
 		for (const handler of toolHandlers) {
 			await handler(
 				{
 					toolName: "write",
-					input: { path: "mutated_test_2.ts" },
+					input: { path: "mutated_module_2.ts" },
 					isError: false,
 					content: "File written",
 				},
 				sessionCtx,
 			);
 		}
-
 		// Should receive another duplicate detector warning
 		const warnings = harness.sentMessages.filter(
 			(m) => m.msg.customType === "duplicate-detector-warning",

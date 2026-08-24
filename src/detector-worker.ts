@@ -71,6 +71,13 @@ function areOptionsEqual(a?: WorkspaceOptions, b?: WorkspaceOptions): boolean {
 	if (a.minLines !== b.minLines) return false;
 	if (a.maxLines !== b.maxLines) return false;
 	if (a.maxIndexedFiles !== b.maxIndexedFiles) return false;
+	if (a.ignoreTests !== b.ignoreTests) return false;
+	const aCustom = (a.customTestPatterns ?? []).slice().sort().join(",");
+	const bCustom = (b.customTestPatterns ?? []).slice().sort().join(",");
+	if (aCustom !== bCustom) return false;
+	const aExclude = (a.excludeTestPatterns ?? []).slice().sort().join(",");
+	const bExclude = (b.excludeTestPatterns ?? []).slice().sort().join(",");
+	if (aExclude !== bExclude) return false;
 	const aIgnores = (a.ignorePatterns ?? []).slice().sort().join(",");
 	const bIgnores = (b.ignorePatterns ?? []).slice().sort().join(",");
 	if (aIgnores !== bIgnores) return false;
@@ -176,6 +183,9 @@ async function runBaselineIndexing(
 		const maxIndexedFiles = options?.maxIndexedFiles ?? MAX_INDEXED_FILES;
 		const trackedFiles = await getTrackedGitFiles(rootDir, {
 			userIgnorePatterns: options?.ignorePatterns,
+			ignoreTests: options?.ignoreTests,
+			customTestPatterns: options?.customTestPatterns,
+			excludeTestPatterns: options?.excludeTestPatterns,
 			signal,
 			maxPaths: Math.max(MAX_GIT_PATHS, maxIndexedFiles),
 		});
@@ -411,8 +421,11 @@ async function runIncrementalGitReconciliation(
 				status: !isGit ? "skipped_not_git" : "complete",
 			};
 		}
-		const ignoreFilter = createIgnoreFilter(options?.ignorePatterns);
-
+		const ignoreFilter = createIgnoreFilter(options?.ignorePatterns, {
+			ignoreTests: options?.ignoreTests,
+			customTestPatterns: options?.customTestPatterns,
+			excludeTestPatterns: options?.excludeTestPatterns,
+		});
 		const { stdout } = await execGit(
 			["status", "--porcelain", "-z", "--", "."],
 			rootDir,
@@ -723,6 +736,9 @@ async function handleWorkerRequest(msg: WorkerRequestMessage): Promise<void> {
 					if (isGit) {
 						const gitFiles = await getTrackedGitFiles(pathToScan, {
 							userIgnorePatterns: optionsToUse?.ignorePatterns,
+							ignoreTests: optionsToUse?.ignoreTests,
+							customTestPatterns: optionsToUse?.customTestPatterns,
+							excludeTestPatterns: optionsToUse?.excludeTestPatterns,
 						});
 						filesToScan.push(...gitFiles);
 					}

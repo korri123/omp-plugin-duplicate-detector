@@ -11,8 +11,11 @@ import {
 import { getFormatByFile, Tokenizer } from "@jscpd/tokenizer";
 import ignore from "ignore";
 import { cloneIdentity } from "./duplicate-ledger";
+import { isTestFile, type TestFileDetectorOptions } from "./test-detector";
 
-export interface JscpdIndexManagerOptions {
+export interface IgnoreFilterOptions extends TestFileDetectorOptions {}
+
+export interface JscpdIndexManagerOptions extends TestFileDetectorOptions {
 	minTokens?: number;
 	minLines?: number;
 	maxLines?: number;
@@ -204,8 +207,10 @@ export function isGeneratedContent(content: string): boolean {
  */
 export function createIgnoreFilter(
 	userIgnorePatterns: string[] = [],
+	options: IgnoreFilterOptions = {},
 ): (relPath: string) => boolean {
 	const ig = ignore().add(DEFAULT_NOISE_PATTERNS).add(userIgnorePatterns);
+	const shouldIgnoreTests = options.ignoreTests !== false;
 	return (relPath: string) => {
 		if (!relPath || typeof relPath !== "string") return false;
 		const normalized = relPath.trim().replace(/\\/g, "/").replace(/^\.\//, "");
@@ -217,6 +222,9 @@ export function createIgnoreFilter(
 			path.isAbsolute(normalized)
 		) {
 			return false;
+		}
+		if (shouldIgnoreTests && isTestFile(normalized, options)) {
+			return true;
 		}
 		try {
 			return ig.ignores(normalized);
@@ -253,6 +261,9 @@ export async function getTrackedGitFiles(
 	rootDir: string,
 	options: {
 		userIgnorePatterns?: string[];
+		ignoreTests?: boolean;
+		customTestPatterns?: string[];
+		excludeTestPatterns?: string[];
 		signal?: AbortSignal;
 		maxPaths?: number;
 	} = {},
@@ -262,9 +273,11 @@ export async function getTrackedGitFiles(
 	}
 
 	const maxPaths = options.maxPaths ?? MAX_GIT_PATHS;
-	const baseIgnore = ignore()
-		.add(DEFAULT_NOISE_PATTERNS)
-		.add(options.userIgnorePatterns ?? []);
+	const ignoreFilter = createIgnoreFilter(options.userIgnorePatterns ?? [], {
+		ignoreTests: options.ignoreTests,
+		customTestPatterns: options.customTestPatterns,
+		excludeTestPatterns: options.excludeTestPatterns,
+	});
 
 	try {
 		const { stdout } = await execGit(
@@ -295,11 +308,7 @@ export async function getTrackedGitFiles(
 			) {
 				continue;
 			}
-			try {
-				if (baseIgnore.ignores(relPath)) continue;
-			} catch {
-				// Ignore errors from node-ignore
-			}
+			if (ignoreFilter(relPath)) continue;
 			results.push(path.resolve(rootDir, trimmed));
 		}
 		return results;
@@ -378,6 +387,7 @@ export class JscpdIndexManager {
 	readonly #tokenizer: Tokenizer;
 	readonly #store: ExportableMemoryStore;
 	readonly #options: IOptions & { maxIndexedFiles?: number };
+	readonly #managerOptions: JscpdIndexManagerOptions;
 	#detector: Detector;
 	#indexedFiles = new Set<string>();
 	#discoveredClones: IClone[] = [];
@@ -391,6 +401,7 @@ export class JscpdIndexManager {
 	constructor(options: JscpdIndexManagerOptions = {}) {
 		this.#tokenizer = new Tokenizer();
 		this.#store = new ExportableMemoryStore();
+		this.#managerOptions = { ...options };
 		this.#options = {
 			minTokens: options.minTokens ?? 40,
 			minLines: options.minLines ?? 5,
@@ -500,6 +511,9 @@ export class JscpdIndexManager {
 		const maxIndexedFiles = this.#options.maxIndexedFiles ?? MAX_INDEXED_FILES;
 		const files = await getTrackedGitFiles(this.#rootDir, {
 			userIgnorePatterns: userIgnores,
+			ignoreTests: this.#managerOptions.ignoreTests,
+			customTestPatterns: this.#managerOptions.customTestPatterns,
+			excludeTestPatterns: this.#managerOptions.excludeTestPatterns,
 			signal,
 			maxPaths: Math.max(MAX_GIT_PATHS, maxIndexedFiles),
 		});
