@@ -175,16 +175,23 @@ async function gitTrack(dir: string, files: string[] = ["."]): Promise<void> {
 
 describe("duplicateDetectorExtension integration", () => {
 	let tempDir: string;
+	let origXdgCacheHome: string | undefined;
 
 	beforeEach(async () => {
 		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-ext-integration-"));
+		origXdgCacheHome = process.env.XDG_CACHE_HOME;
+		process.env.XDG_CACHE_HOME = path.join(tempDir, ".cache");
 		await setupGitRepo(tempDir);
 	});
 
 	afterEach(async () => {
+		if (origXdgCacheHome === undefined) {
+			delete process.env.XDG_CACHE_HOME;
+		} else {
+			process.env.XDG_CACHE_HOME = origXdgCacheHome;
+		}
 		await fs.rm(tempDir, { recursive: true, force: true });
 	});
-
 	it("intercepts write tool_result and sends live steer custom message by default", async () => {
 		const existingCode = `
 export function validateTransactionPayload(tx: { id: string; amount: number; sender: string; recipient: string }): boolean {
