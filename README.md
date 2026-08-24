@@ -9,27 +9,13 @@ The plugin indexes your repository in the background and watches the agent as it
 Indexing and mutation checks run entirely in a background worker with a persistent on-disk cache, so sessions start instantly and the agent loop is never blocked, even in large repositories.
 ## Installation
 
-Link the plugin into your local `omp` registry:
+Install directly via the `omp` CLI:
 
 ```bash
-omp plugin link /path/to/omp-plugin-duplicate-detector
-```
-
-Or declare it in `~/.omp/agent/config.yml` (or a project-level `.omp/config.yml`):
-
-```yaml
-extensions:
-  - /path/to/omp-plugin-duplicate-detector
-```
-
-Or load it for a single session:
-
-```bash
-omp -e /path/to/omp-plugin-duplicate-detector
+omp plugin install omp-plugin-duplicate-detector
 ```
 
 On startup you'll see a short readiness note in the transcript, e.g. `Duplicate detector: Ready (1,420 Git files indexed, cached)`.
-
 ## Usage
 
 ### Real-time warnings
