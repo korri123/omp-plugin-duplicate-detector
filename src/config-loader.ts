@@ -20,7 +20,7 @@ export interface JscpdProjectConfig {
 }
 
 /** Standard configuration file candidates in priority order */
-export const JSCPD_CONFIG_CANDIDATES = [
+const JSCPD_CONFIG_CANDIDATES = [
 	".jscpd.json",
 	".jscpd.rc.json",
 	".jscpd.rc",

@@ -20,7 +20,7 @@ import {
 } from "./source-aware-index";
 import type { WorkspaceOptions } from "./worker-protocol";
 
-export const DEFAULT_MAX_CACHE_BYTES = 250 * 1024 * 1024; // 250 MB
+const DEFAULT_MAX_CACHE_BYTES = 250 * 1024 * 1024; // 250 MB
 
 export interface DiskCacheOptions {
 	/** Root directory of the workspace */
@@ -108,17 +108,6 @@ export function computeWorkspaceCachePath(
 }
 
 /**
- * Computes the workspace cache directory or database path keyed by canonical workspace path and config fingerprint.
- */
-export function computeWorkspaceCacheDir(
-	baseDir: string,
-	rootDir: string,
-	configFingerprint: string,
-): string {
-	return computeWorkspaceCachePath(baseDir, rootDir, configFingerprint);
-}
-
-/**
  * Computes a shard key hash of (sourceRelPath, contentHash, configFingerprint).
  */
 export function computeShardKey(
@@ -142,7 +131,7 @@ export const CACHE_FORMAT_VERSION = 3;
 /**
  * Encodes a SerializedSourceShard into a high-density, zlib-compressed binary buffer (DUP3 format).
  */
-export function packBinaryShard(shard: SerializedSourceShard): Buffer {
+function packBinaryShard(shard: SerializedSourceShard): Buffer {
 	return packBinaryShardV3(shard, shard.tokens ?? []);
 }
 

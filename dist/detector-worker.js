@@ -12078,7 +12078,6 @@ async function getTrackedGitFiles(rootDir, options = {}) {
     return [];
   }
 }
-var DEFAULT_MAX_INLINE_BYTES = 50 * 1024;
 
 // src/source-aware-index.ts
 var fastTokenHash = (val) => Bun.hash(val).toString(16).padStart(20, "0");

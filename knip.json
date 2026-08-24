@@ -1,0 +1,12 @@
+{
+	"$schema": "https://unpkg.com/knip@latest/overview/configuration-schema.json",
+	"entry": [
+		"src/index.ts",
+		"src/detector-worker.ts",
+		"test/**/*.test.ts",
+		"test/**/*.ts"
+	],
+	"project": ["src/**/*.ts", "test/**/*.ts"],
+	"ignoreDependencies": ["husky"],
+	"includeEntryExports": true
+}

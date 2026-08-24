@@ -11,7 +11,7 @@ import type {
 import duplicateDetectorExtension from "../src/index";
 import { JscpdIndexManager } from "../src/jscpd-engine";
 
-export interface MockSentMessage {
+interface MockSentMessage {
 	msg: {
 		customType?: string;
 		content?: string;

@@ -17,11 +17,9 @@ import {
 	CACHE_FORMAT_VERSION,
 	computeConfigFingerprint,
 	computeShardKey,
-	computeWorkspaceCacheDir,
 	computeWorkspaceCachePath,
 	DiskCacheManager,
 	getDefaultCacheDir,
-	packBinaryShard,
 	unpackBinaryShard,
 } from "../src/disk-cache";
 import {
@@ -463,13 +461,6 @@ export function formatCurrency(amount: number, currency = "USD"): string {
 				"src/file_3.ts",
 			);
 
-			const size1 = (
-				db
-					.prepare(
-						"SELECT LENGTH(payload) as size FROM shards WHERE rel_path = 'src/file_1.ts'",
-					)
-					.get() as { size: number }
-			).size;
 			const size2 = (
 				db
 					.prepare(

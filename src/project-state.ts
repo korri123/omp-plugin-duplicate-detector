@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { getDefaultCacheDir } from "./disk-cache";
 
-export interface ProjectStateEntry {
+interface ProjectStateEntry {
 	enabled: boolean;
 	updatedAt?: string;
 }

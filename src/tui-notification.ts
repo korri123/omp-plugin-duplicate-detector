@@ -8,7 +8,7 @@
  *   `triggerTurn: false` (displays full report card without prompting an immediate LLM turn).
  * - 'duplicate-detector-status': Ready/capped indexing status lines in the session feed.
  */
-export interface CloneDuplicationSpan {
+interface CloneDuplicationSpan {
 	sourceId: string;
 	start: { line: number; column?: number };
 	end: { line: number; column?: number };
@@ -35,12 +35,8 @@ export interface DuplicateStatusData {
 	cachedCount?: number;
 	content?: string;
 }
-export interface ThemeColors {
-	warning: string;
-	[key: string]: string;
-}
 
-export interface ThemeIcons {
+interface ThemeIcons {
 	warning?: string;
 	rewind?: string;
 	package?: string;
@@ -188,7 +184,7 @@ export function truncateVisible(text: string, maxWidth: number): string {
 /**
  * Pad or truncate a line to the exact target width taking visual width and ANSI sequences into account.
  */
-export function padLine(text: string, width: number): string {
+function padLine(text: string, width: number): string {
 	const visibleLen = stripAnsi(text).length;
 	if (visibleLen === width) return text;
 	if (visibleLen < width) return text + " ".repeat(width - visibleLen);

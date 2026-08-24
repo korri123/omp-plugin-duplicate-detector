@@ -4,7 +4,6 @@
  * wipe out shared code hashes for remaining sources.
  */
 
-import * as crypto from "node:crypto";
 import {
 	getDefaultOptions,
 	type IClone,

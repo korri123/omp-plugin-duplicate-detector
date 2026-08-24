@@ -68,9 +68,7 @@ export function generateRandomString(length: number): string {
 			let callCount = 0;
 			const customHash = (val: string): string => {
 				callCount++;
-				return Bun.hash(val + "_custom")
-					.toString(16)
-					.padStart(20, "0");
+				return Bun.hash(`${val}_custom`).toString(16).padStart(20, "0");
 			};
 
 			const index = new SourceAwareCloneIndex({

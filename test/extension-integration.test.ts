@@ -16,7 +16,7 @@ interface ToolTextContent {
 	text: string;
 }
 
-export interface MockSentMessage {
+interface MockSentMessage {
 	msg: {
 		customType?: string;
 		content?: string;

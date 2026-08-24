@@ -78,7 +78,7 @@ function computeConfigHash(
 		maxIndexedFiles: config.maxIndexedFiles,
 	});
 }
-export function resolveDefaultWorkerUrl(): string {
+function resolveDefaultWorkerUrl(): string {
 	try {
 		const distFromSrc = new URL("../dist/detector-worker.js", import.meta.url);
 		return distFromSrc.href;

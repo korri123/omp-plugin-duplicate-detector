@@ -14,7 +14,6 @@ import {
 	type BaselineStatus,
 	createIgnoreFilter,
 	isGeneratedContent,
-	JscpdIndexManager,
 	MAX_INDEXED_FILES,
 } from "./jscpd-engine";
 import { isProjectEnabled, setProjectEnabled } from "./project-state";
@@ -25,17 +24,6 @@ import {
 	type DuplicateStatusData,
 	type ThemeLike,
 } from "./tui-notification";
-
-export * from "./config-loader";
-export * from "./coordinator";
-export * from "./disk-cache";
-export * from "./duplicate-ledger";
-export * from "./jscpd-engine";
-export * from "./project-state";
-export * from "./source-aware-index";
-export * from "./tui-notification";
-export * from "./types";
-export * from "./worker-protocol";
 
 export interface DuplicateDetectorConfig {
 	minLines: number;
@@ -155,26 +143,6 @@ export function resolveConfig(
 		formatsExts: baseFormatsExts,
 		configSource,
 	};
-}
-
-/**
- * Creates a configured JscpdIndexManager from a DuplicateDetectorConfig.
- */
-export function createEngineFromConfig(
-	config: DuplicateDetectorConfig,
-	overrides: {
-		minLines?: number;
-		minTokens?: number;
-		maxIndexedFiles?: number;
-	} = {},
-): JscpdIndexManager {
-	return new JscpdIndexManager({
-		minLines: overrides.minLines ?? config.minLines,
-		minTokens: overrides.minTokens ?? config.minTokens,
-		maxLines: config.maxLines,
-		formatsExts: config.formatsExts,
-		maxIndexedFiles: overrides.maxIndexedFiles ?? config.maxIndexedFiles,
-	});
 }
 
 function extractSettingsObject(

@@ -15,7 +15,7 @@ export function cloneIdentity(clone: IClone): string {
 /**
  * Extract source code lines between start and end lines (1-indexed).
  */
-export function extractLineRange(
+function extractLineRange(
 	content: string,
 	startLine: number,
 	endLine: number,

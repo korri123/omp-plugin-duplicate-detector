@@ -12,7 +12,7 @@ import { getFormatByFile, Tokenizer } from "@jscpd/tokenizer";
 import ignore from "ignore";
 import { cloneIdentity } from "./duplicate-ledger";
 
-export interface JscpdEngineOptions {
+export interface JscpdIndexManagerOptions {
 	minTokens?: number;
 	minLines?: number;
 	maxLines?: number;
@@ -21,8 +21,6 @@ export interface JscpdEngineOptions {
 	crossFormats?: boolean;
 	maxIndexedFiles?: number;
 }
-
-export type JscpdIndexManagerOptions = JscpdEngineOptions;
 
 export type BaselineStatus =
 	| "idle"
@@ -49,7 +47,7 @@ export const MAX_GIT_PATHS = 10000;
  * Common generated, lockfile, minified, and metadata file patterns
  * automatically excluded from code duplication analysis.
  */
-export const DEFAULT_NOISE_PATTERNS = [
+const DEFAULT_NOISE_PATTERNS = [
 	"*.lock",
 	"*.lockb",
 	"*-lock.json",
@@ -71,7 +69,7 @@ export const DEFAULT_NOISE_PATTERNS = [
 /**
  * Non-code data, documentation, and metadata formats excluded from default code duplicate analysis.
  */
-export const DEFAULT_NON_CODE_FORMATS: ReadonlySet<string> = new Set([
+const DEFAULT_NON_CODE_FORMATS: ReadonlySet<string> = new Set([
 	"abnf",
 	"apacheconf",
 	"arff",
@@ -314,7 +312,7 @@ export async function getTrackedGitFiles(
  * Isolated overlay store for running non-mutating snippet queries.
  * Prevents virtual query frames from polluting the persistent MemoryStore.
  */
-export class IsolatedMemoryStore implements IStore<IMapFrame> {
+class IsolatedMemoryStore implements IStore<IMapFrame> {
 	#namespace = "";
 	readonly #baseValues: Record<string, Record<string, IMapFrame>>;
 	readonly #overlayValues: Record<string, Record<string, IMapFrame>> = {};
@@ -679,9 +677,6 @@ export class JscpdIndexManager {
 		});
 	}
 }
-
-export const DEFAULT_MAX_INLINE_CLONES = 15;
-export const DEFAULT_MAX_INLINE_BYTES = 50 * 1024; // 50 KB (matching oh-my-pi DEFAULT_MAX_BYTES)
 
 export interface FormatReportOptions {
 	indexedCount?: number;

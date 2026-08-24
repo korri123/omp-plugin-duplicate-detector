@@ -4,9 +4,9 @@ import type {
 	ExtensionAPI,
 	RegisteredCommand,
 } from "@oh-my-pi/pi-coding-agent";
-import { z } from "zod";
 import { DuplicateLedger } from "../src/duplicate-ledger";
-import duplicateDetectorExtension, { formatReport } from "../src/index";
+import duplicateDetectorExtension from "../src/index";
+import { formatReport } from "../src/jscpd-engine";
 import {
 	DuplicateNotificationComponent,
 	parseClonesFromText,
@@ -184,7 +184,6 @@ describe("Artifact & Truncation System", () => {
 			const registeredCommands: Record<string, RegisteredCommand> = {};
 
 			const mockPi = {
-				zod: z,
 				logger: {
 					info: () => {},
 					warn: () => {},
@@ -215,7 +214,6 @@ describe("Artifact & Truncation System", () => {
 			> = {};
 
 			const mockPi = {
-				zod: z,
 				logger: {
 					info: () => {},
 					warn: () => {},

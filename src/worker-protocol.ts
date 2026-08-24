@@ -69,49 +69,49 @@ export interface ScanPayload {
 // Main to Worker Request Messages
 // ============================================================================
 
-export interface OpenWorkspaceRequest {
+interface OpenWorkspaceRequest {
 	id: string;
 	type: "openWorkspace";
 	payload: OpenWorkspacePayload;
 }
 
-export interface CheckSnippetRequest {
+interface CheckSnippetRequest {
 	id: string;
 	type: "checkSnippet";
 	payload: CheckSnippetPayload;
 }
 
-export interface CheckAndUpdateRequest {
+interface CheckAndUpdateRequest {
 	id: string;
 	type: "checkAndUpdate";
 	payload: CheckAndUpdatePayload;
 }
 
-export interface UpdateFileRequest {
+interface UpdateFileRequest {
 	id: string;
 	type: "updateFile";
 	payload: UpdateFilePayload;
 }
 
-export interface RemoveFileRequest {
+interface RemoveFileRequest {
 	id: string;
 	type: "removeFile";
 	payload: RemoveFilePayload;
 }
 
-export interface ReconcileRequest {
+interface ReconcileRequest {
 	id: string;
 	type: "reconcile";
 	payload: ReconcilePayload;
 }
 
-export interface ScanRequest {
+interface ScanRequest {
 	id: string;
 	type: "scan";
 	payload?: ScanPayload;
 }
 
-export interface CloseRequest {
+interface CloseRequest {
 	id: string;
 	type: "close";
 	payload?: Record<string, never>;
@@ -144,7 +144,7 @@ export interface WorkerErrorResponse {
 	stack?: string;
 }
 
-export type WorkerResponse<T = unknown> =
+type WorkerResponse<T = unknown> =
 	| WorkerSuccessResponse<T>
 	| WorkerErrorResponse;
 
@@ -154,7 +154,7 @@ export type WorkerResponseMessage = WorkerResponse<unknown>;
 // Worker to Main Event Notifications
 // ============================================================================
 
-export type WorkerProgressPhase = "scanning" | "indexing" | "reconciling";
+type WorkerProgressPhase = "scanning" | "indexing" | "reconciling";
 
 export interface WorkerProgressPayload {
 	phase: WorkerProgressPhase;
@@ -217,13 +217,6 @@ export type WorkerEventMessage =
 	| WorkerStatusEvent;
 
 // ============================================================================
-// Top-Level Protocol Discriminated Union
-// ============================================================================
-
-export type WorkerMessage =
-	| WorkerRequestMessage
-	| WorkerResponseMessage
-	| WorkerEventMessage;
 
 // ============================================================================
 // Type Guards
