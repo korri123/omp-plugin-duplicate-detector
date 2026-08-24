@@ -57,9 +57,14 @@ Plugin settings (via the extension's `settings` in your omp config):
 |---|---|---|
 | `minLines` | `5` | Minimum consecutive lines to report as a duplicate |
 | `minTokens` | `40` | Minimum token count for a duplicate block |
+| `maxLines` | `500` | Maximum line count for a duplicate block |
 | `checkOnMutation` | `true` | Real-time checks on `write` / `edit` |
 | `reminderMode` | `"steer"` | `"steer"`, `"in-band"`, or `"none"` |
 | `ignorePatterns` | — | Glob patterns to exclude (array, or comma-separated string) |
+| `ignoreTests` | `true` | Automatically ignore test files, test directories, mocks, and fixtures across languages |
+| `customTestPatterns` | — | Additional glob patterns or substrings to treat as test files |
+| `excludeTestPatterns` | — | Patterns to exclude from test detection (un-ignore, keeping them as production code) |
+| `formatsExts` | — | Custom mapping of formats to file extensions (e.g. `{ "markdown": ["md", "mdx"] }`) |
 | `maxIndexedFiles` | `10000` | Cap on files indexed during the baseline scan |
 
 ### Project configuration
@@ -70,12 +75,25 @@ Standard `jscpd` configuration is discovered automatically — `.jscpd.json` and
 {
   "minLines": 6,
   "minTokens": 50,
-  "ignore": ["**/__tests__/**", "**/fixtures/**"]
+  "ignore": ["vendor/**", "build/**"],
+  "ignoreTests": true,
+  "customTestPatterns": ["**/custom_fixtures/**"],
+  "excludeTestPatterns": ["**/src/services/test-utils-in-prod.ts"],
+  "formatsExts": {
+    "yaml": ["yml", "yaml"],
+    "markdown": ["md", "mdx"]
+  }
 }
 ```
 
-By default only real programming languages are tokenized; documentation, markup, data files, lockfiles, minified bundles, and generated code are skipped. Use `formatsExts` in your jscpd config to opt extra formats in (e.g. `{ "markdown": ["md", "mdx"] }`).
+## What is filtered by default
 
+To prevent false alarms, noise from test fixtures, and unnecessary tokenization, the detector filters out non-production code, data files, and build artifacts by default:
+
+- **Test files and directories (`ignoreTests: true`):** Test files, test suites, test doubles (mocks, stubs, fakes), fixtures, snapshots, and test runners across common languages and frameworks (e.g. Jest, Vitest, Pytest, Go, JUnit, Cargo, etc.) are skipped automatically. Use `customTestPatterns` to ignore additional paths, `excludeTestPatterns` to keep specific paths in production scope, or `ignoreTests: false` to disable test filtering entirely.
+- **Non-code and data formats:** Documentation (`.md`, `.txt`), data and configuration files (`.json`, `.yaml`, `.toml`, `.csv`, `.ini`), server configs (`nginx`, `apacheconf`), diffs, logs, and standalone markup data (`.svg`, `.xml`) are excluded. To scan duplicates within specific data or doc formats, opt them in via `formatsExts`.
+- **Generated code and lockfiles:** Files containing standard auto-generation header markers (such as `@generated` or `DO NOT EDIT`), generated file naming conventions (`*.generated.*`, `*.designer.cs`), lockfiles (`*.lock`, `*-lock.json`), and minified assets (`*.min.js`, `*.map`) are ignored.
+- **Safety and resource limits:** Large files (>100 KiB) and files outside the Git repository are skipped to maintain minimal memory usage and fast background indexing.
 ## Scope and performance
 
 - Only Git-tracked files are indexed (`git ls-files`); outside a Git repository, baseline scanning is skipped.
