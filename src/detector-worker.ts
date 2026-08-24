@@ -290,7 +290,7 @@ async function runBaselineIndexing(
 
 						return {
 							filePath,
-							content,
+							content: shard ? null : content,
 							contentHash,
 							relPath,
 							size: stat.size,

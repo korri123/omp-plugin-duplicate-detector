@@ -14,7 +14,64 @@ import {
 } from "@jscpd/core";
 import { Tokenizer } from "@jscpd/tokenizer";
 import { getSupportedCodeFormat } from "./jscpd-engine";
-export type SourceFrame = IMapFrame;
+export class CompactSourceFrame {
+	constructor(
+		public readonly id: string,
+		public readonly sourceId: string,
+		public readonly startLine: number,
+		public readonly startCol: number,
+		public readonly startPos: number,
+		public readonly startRange: number,
+		public readonly endLine: number,
+		public readonly endCol: number,
+		public readonly endPos: number,
+		public readonly endRange: number,
+	) {}
+
+	get start() {
+		return {
+			line: this.startLine,
+			column: this.startCol,
+			position: this.startPos,
+			range: [this.startRange, this.startRange] as [number, number],
+			loc: {
+				start: {
+					line: this.startLine,
+					column: this.startCol,
+					position: this.startPos,
+				},
+				end: {
+					line: this.startLine,
+					column: this.startCol,
+					position: this.startPos,
+				},
+			},
+		};
+	}
+
+	get end() {
+		return {
+			line: this.endLine,
+			column: this.endCol,
+			position: this.endPos,
+			range: [this.endRange, this.endRange] as [number, number],
+			loc: {
+				start: {
+					line: this.endLine,
+					column: this.endCol,
+					position: this.endPos,
+				},
+				end: {
+					line: this.endLine,
+					column: this.endCol,
+					position: this.endPos,
+				},
+			},
+		};
+	}
+}
+
+export type SourceFrame = IMapFrame | CompactSourceFrame;
 
 export interface SerializedToken {
 	hash: string;
@@ -49,13 +106,13 @@ export function reconstructFramesFromTokens(
 	sourceId: string,
 	minTokens: number,
 	hashFunction: (val: string) => string = fastTokenHash,
-): SourceFrame[] {
+): CompactSourceFrame[] {
 	const tokenCount = tokens.length;
 	const frameCount = Math.max(0, tokenCount - minTokens);
 	const hashMap = tokens.map((t) => t.hash).join("");
 	const TOKEN_HASH_LEN = 20;
 
-	const frames: SourceFrame[] = new Array(frameCount);
+	const frames: CompactSourceFrame[] = new Array(frameCount);
 	for (let i = 0; i < frameCount; i++) {
 		const windowSub = hashMap.substring(
 			i * TOKEN_HASH_LEN,
@@ -65,40 +122,18 @@ export function reconstructFramesFromTokens(
 		const startTok = tokens[i]!;
 		const endTok = tokens[i + minTokens]!;
 
-		const startLine = startTok.line;
-		const startCol = startTok.column;
-		const startPos = startTok.position;
-		const startRange0 = startTok.range[0];
-
-		const endLine = endTok.line;
-		const endCol = endTok.column;
-		const endPos = endTok.position;
-		const endRange1 = endTok.range[1];
-
-		frames[i] = {
-			id: windowHash,
+		frames[i] = new CompactSourceFrame(
+			windowHash,
 			sourceId,
-			start: {
-				line: startLine,
-				column: startCol,
-				position: startPos,
-				range: [startRange0, startRange0],
-				loc: {
-					start: { line: startLine, column: startCol, position: startPos },
-					end: { line: startLine, column: startCol, position: startPos },
-				},
-			},
-			end: {
-				line: endLine,
-				column: endCol,
-				position: endPos,
-				range: [endRange1, endRange1],
-				loc: {
-					start: { line: endLine, column: endCol, position: endPos },
-					end: { line: endLine, column: endCol, position: endPos },
-				},
-			},
-		};
+			startTok.line,
+			startTok.column,
+			startTok.position,
+			startTok.range[0],
+			endTok.line,
+			endTok.column,
+			endTok.position,
+			endTok.range[1],
+		);
 	}
 	return frames;
 }
@@ -157,10 +192,12 @@ interface TokenMapsResult {
  * sources or locations share a token sequence.
  */
 export class SourceAwareCloneIndex {
-	readonly framesByHash = new Map<string, SourceFrame | SourceFrame[]>();
-	readonly hashesBySource = new Map<string, Set<string>>();
+	readonly framesByHash = new Map<
+		string,
+		CompactSourceFrame | CompactSourceFrame[]
+	>();
+	readonly hashesBySource = new Map<string, string[]>();
 	readonly sources = new Map<string, SourceMeta>();
-	readonly #framesBySource = new Map<string, SourceFrame[]>();
 	readonly #tokensBySource = new Map<string, SerializedToken[]>();
 	clones: IClone[] = [];
 	readonly #tokenizer: Tokenizer;
@@ -254,7 +291,6 @@ export class SourceAwareCloneIndex {
 		this.framesByHash.clear();
 		this.hashesBySource.clear();
 		this.sources.clear();
-		this.#framesBySource.clear();
 		this.#tokensBySource.clear();
 		this.clones = [];
 	}
@@ -268,89 +304,11 @@ export class SourceAwareCloneIndex {
 			this.removeSource(sourceId);
 		}
 
-		const tokenData = this.#generateTokenMaps(sourceId, content, format);
-		if (!tokenData) {
+		const shard = this.tokenizeSource(sourceId, content, "", format);
+		if (!shard) {
 			return [];
 		}
-
-		const hashes = new Set<string>();
-		const sourceFrames: SourceFrame[] = [];
-		const sourceTokens: SerializedToken[] = [];
-		const TOKEN_HASH_LEN = 20;
-
-		for (const tokenMap of tokenData.maps) {
-			const mapTokens = (tokenMap as unknown as { tokens?: unknown[] }).tokens;
-			const hashMap = (tokenMap as unknown as { hashMap?: string }).hashMap;
-
-			if (Array.isArray(mapTokens) && typeof hashMap === "string") {
-				for (let i = 0; i < mapTokens.length; i++) {
-					const t = mapTokens[i] as {
-						line?: number;
-						column?: number;
-						position?: number;
-						range?: [number, number];
-						loc?: { start: { line: number; column: number; position: number } };
-					};
-					const hash = hashMap.substring(
-						i * TOKEN_HASH_LEN,
-						(i + 1) * TOKEN_HASH_LEN,
-					);
-					sourceTokens.push({
-						hash,
-						line: t.loc?.start.line ?? t.line ?? 1,
-						column: t.loc?.start.column ?? t.column ?? 1,
-						position: t.loc?.start.position ?? t.position ?? i,
-						range: t.range ? [t.range[0], t.range[1]] : [0, 0],
-					});
-				}
-			}
-
-			while (true) {
-				const nextResult = tokenMap.next();
-				if (
-					nextResult.done ||
-					!nextResult.value ||
-					typeof nextResult.value === "boolean"
-				) {
-					break;
-				}
-				sourceFrames.push(nextResult.value as SourceFrame);
-			}
-		}
-
-		const newClones = this.#detectClonesFromFrames(
-			sourceFrames,
-			sourceId,
-			tokenData.format,
-			{
-				insertFrames: true,
-				hashes,
-			},
-		);
-
-		let totalTokens = 0;
-		let totalLines = 0;
-		for (const map of tokenData.maps) {
-			totalTokens += map.getTokensCount();
-			totalLines += map.getLinesCount();
-		}
-
-		this.hashesBySource.set(sourceId, hashes);
-		this.#framesBySource.set(sourceId, sourceFrames);
-		if (sourceTokens.length > 0) {
-			this.#tokensBySource.set(sourceId, sourceTokens);
-		}
-		this.sources.set(sourceId, {
-			sourceId,
-			format: tokenData.format,
-			size: content.length,
-			lines: totalLines || content.split(/\r?\n/).length,
-			tokenCount: totalTokens,
-			updatedAt: Date.now(),
-		});
-
-		this.clones.push(...newClones);
-		return newClones;
+		return this.hydrateSourceShard(shard);
 	}
 
 	/**
@@ -361,18 +319,42 @@ export class SourceAwareCloneIndex {
 		contentHash: string,
 	): SerializedSourceShard | null {
 		const meta = this.sources.get(sourceId);
-		const tokens = this.#tokensBySource.get(sourceId);
-		const frames = this.#framesBySource.get(sourceId);
-		if (!meta || (!tokens && !frames)) {
+		const hashes = this.hashesBySource.get(sourceId);
+		if (!meta || !hashes) {
 			return null;
 		}
-		const minTokens = this.#minTokens;
-		const exportedTokens = tokens ? tokens.slice() : undefined;
-		const fallbackFrames = frames ? frames.slice() : [];
-		const hashFn = this.#hashFunction;
 
-		let memoizedFrames: SourceFrame[] | null =
-			fallbackFrames.length > 0 ? fallbackFrames : null;
+		const minTokens = this.#minTokens;
+		const hashFn = this.#hashFunction;
+		const tokens = this.#tokensBySource.get(sourceId);
+		let memoizedFrames: CompactSourceFrame[] | null = null;
+
+		const getFrames = (): CompactSourceFrame[] => {
+			if (!memoizedFrames) {
+				if (tokens && tokens.length > 0) {
+					memoizedFrames = reconstructFramesFromTokens(
+						tokens,
+						meta.sourceId,
+						minTokens,
+						hashFn,
+					);
+				} else {
+					const frames: CompactSourceFrame[] = [];
+					for (const hash of hashes) {
+						const entry = this.framesByHash.get(hash);
+						if (!entry) continue;
+						if (Array.isArray(entry)) {
+							const match = entry.find((f) => f.sourceId === sourceId);
+							if (match) frames.push(match);
+						} else if (entry.sourceId === sourceId) {
+							frames.push(entry);
+						}
+					}
+					memoizedFrames = frames;
+				}
+			}
+			return memoizedFrames ?? [];
+		};
 
 		return {
 			version: 1,
@@ -384,21 +366,9 @@ export class SourceAwareCloneIndex {
 			tokenCount: meta.tokenCount,
 			minTokens,
 			updatedAt: meta.updatedAt,
-			tokens: exportedTokens,
-			get frames(): SourceFrame[] {
-				if (!memoizedFrames) {
-					if (exportedTokens && exportedTokens.length > 0) {
-						memoizedFrames = reconstructFramesFromTokens(
-							exportedTokens,
-							meta.sourceId,
-							minTokens,
-							hashFn,
-						);
-					} else {
-						memoizedFrames = [];
-					}
-				}
-				return memoizedFrames;
+			tokens,
+			get frames(): CompactSourceFrame[] {
+				return getFrames();
 			},
 		};
 	}
@@ -435,7 +405,6 @@ export class SourceAwareCloneIndex {
 			return null;
 		}
 
-		const sourceFrames: SourceFrame[] = [];
 		const sourceTokens: SerializedToken[] = [];
 		const TOKEN_HASH_LEN = 20;
 
@@ -465,19 +434,14 @@ export class SourceAwareCloneIndex {
 					});
 				}
 			}
-
-			while (true) {
-				const nextResult = tokenMap.next();
-				if (
-					nextResult.done ||
-					!nextResult.value ||
-					typeof nextResult.value === "boolean"
-				) {
-					break;
-				}
-				sourceFrames.push(nextResult.value as SourceFrame);
-			}
 		}
+
+		const sourceFrames = reconstructFramesFromTokens(
+			sourceTokens,
+			sourceId,
+			this.#minTokens,
+			this.#hashFunction,
+		);
 
 		let totalTokens = 0;
 		let totalLines = 0;
@@ -511,16 +475,60 @@ export class SourceAwareCloneIndex {
 			this.removeSource(sourceId);
 		}
 
-		let normalizedFrames: SourceFrame[];
+		let normalizedFrames: CompactSourceFrame[];
 		const shardTokens = shard.tokens;
 
 		if (shard.frames && shard.frames.length > 0) {
-			normalizedFrames =
-				shard.frames[0]?.sourceId === sourceId
-					? shard.frames
-					: shard.frames.map((f) =>
-							f.sourceId === sourceId ? f : { ...f, sourceId },
-						);
+			normalizedFrames = shard.frames.map((f) => {
+				if (f instanceof CompactSourceFrame && f.sourceId === sourceId) {
+					return f;
+				}
+				const startLine =
+					"startLine" in f
+						? f.startLine
+						: (f.start.loc?.start.line ?? f.start.line ?? 1);
+				const startCol =
+					"startCol" in f
+						? f.startCol
+						: (f.start.loc?.start.column ?? f.start.column ?? 1);
+				const startPos =
+					"startPos" in f
+						? f.startPos
+						: (f.start.loc?.start.position ?? f.start.position ?? 0);
+				const startRange =
+					"startRange" in f
+						? f.startRange
+						: f.start.range
+							? f.start.range[0]
+							: 0;
+				const endLine =
+					"endLine" in f
+						? f.endLine
+						: (f.end.loc?.end.line ?? f.end.line ?? startLine);
+				const endCol =
+					"endCol" in f
+						? f.endCol
+						: (f.end.loc?.end.column ?? f.end.column ?? startCol);
+				const endPos =
+					"endPos" in f
+						? f.endPos
+						: (f.end.loc?.end.position ?? f.end.position ?? 0);
+				const endRange =
+					"endRange" in f ? f.endRange : f.end.range ? f.end.range[1] : 0;
+
+				return new CompactSourceFrame(
+					f.id,
+					sourceId,
+					startLine,
+					startCol,
+					startPos,
+					startRange,
+					endLine,
+					endCol,
+					endPos,
+					endRange,
+				);
+			});
 		} else if (shardTokens && shardTokens.length > 0) {
 			normalizedFrames = reconstructFramesFromTokens(
 				shardTokens,
@@ -532,14 +540,17 @@ export class SourceAwareCloneIndex {
 			normalizedFrames = [];
 		}
 
-		const hashes = new Set<string>();
+		const hashes: string[] = new Array(normalizedFrames.length);
+		for (let i = 0; i < normalizedFrames.length; i++) {
+			hashes[i] = normalizedFrames[i]!.id;
+		}
+
 		const newClones = this.#detectClonesFromFrames(
 			normalizedFrames,
 			sourceId,
 			format,
 			{
 				insertFrames: true,
-				hashes,
 			},
 		);
 
@@ -547,7 +558,6 @@ export class SourceAwareCloneIndex {
 		if (shardTokens && shardTokens.length > 0) {
 			this.#tokensBySource.set(sourceId, shardTokens);
 		}
-		this.#framesBySource.set(sourceId, normalizedFrames);
 		this.sources.set(sourceId, {
 			sourceId,
 			format,
@@ -556,7 +566,6 @@ export class SourceAwareCloneIndex {
 			tokenCount,
 			updatedAt: shard.updatedAt ?? Date.now(),
 		});
-
 		this.clones.push(...newClones);
 		return newClones;
 	}
@@ -597,7 +606,6 @@ export class SourceAwareCloneIndex {
 			this.hashesBySource.delete(sourceId);
 		}
 
-		this.#framesBySource.delete(sourceId);
 		this.#tokensBySource.delete(sourceId);
 		this.sources.delete(sourceId);
 		this.clones = this.clones.filter(
@@ -606,7 +614,6 @@ export class SourceAwareCloneIndex {
 				c.duplicationB.sourceId !== sourceId,
 		);
 	}
-
 	/**
 	 * Update an existing source with modified content.
 	 */
@@ -625,29 +632,14 @@ export class SourceAwareCloneIndex {
 			return [];
 		}
 
-		const sourceFrames: SourceFrame[] = [];
-		for (const tokenMap of tokenData.maps) {
-			while (true) {
-				const nextResult = tokenMap.next();
-				if (
-					nextResult.done ||
-					!nextResult.value ||
-					typeof nextResult.value === "boolean"
-				) {
-					break;
-				}
-				sourceFrames.push(nextResult.value as SourceFrame);
-			}
+		const shard = this.tokenizeSource(sourceId, content, "", format);
+		if (!shard) {
+			return [];
 		}
 
-		return this.#detectClonesFromFrames(
-			sourceFrames,
-			sourceId,
-			tokenData.format,
-			{
-				insertFrames: false,
-			},
-		);
+		return this.#detectClonesFromFrames(shard.frames, sourceId, shard.format, {
+			insertFrames: false,
+		});
 	}
 
 	#generateTokenMaps(
@@ -678,24 +670,66 @@ export class SourceAwareCloneIndex {
 		frames: SourceFrame[],
 		sourceId: string,
 		format: string,
-		options: { insertFrames?: boolean; hashes?: Set<string> } = {},
+		options: { insertFrames?: boolean } = {},
 	): IClone[] {
 		const detectedClones: IClone[] = [];
-		const { insertFrames = false, hashes } = options;
+		const { insertFrames = false } = options;
 		let activeClones = new Map<string, ActiveCloneCandidate>();
 
 		for (const frame of frames) {
-			const normalizedFrame: SourceFrame =
-				frame.sourceId === sourceId
+			const frameStartLine =
+				"startLine" in frame
+					? frame.startLine
+					: (frame.start.loc?.start.line ?? frame.start.line ?? 1);
+			const frameStartCol =
+				"startCol" in frame
+					? frame.startCol
+					: (frame.start.loc?.start.column ?? frame.start.column ?? 1);
+			const frameStartPos =
+				"startPos" in frame
+					? frame.startPos
+					: (frame.start.loc?.start.position ?? frame.start.position ?? 0);
+			const frameStartRange =
+				"startRange" in frame
+					? frame.startRange
+					: frame.start.range
+						? frame.start.range[0]
+						: 0;
+			const frameEndLine =
+				"endLine" in frame
+					? frame.endLine
+					: (frame.end.loc?.end.line ?? frame.end.line ?? frameStartLine);
+			const frameEndCol =
+				"endCol" in frame
+					? frame.endCol
+					: (frame.end.loc?.end.column ?? frame.end.column ?? frameStartCol);
+			const frameEndPos =
+				"endPos" in frame
+					? frame.endPos
+					: (frame.end.loc?.end.position ?? frame.end.position ?? 0);
+			const frameEndRange =
+				"endRange" in frame
+					? frame.endRange
+					: frame.end.range
+						? frame.end.range[1]
+						: 0;
+
+			const normalizedFrame: CompactSourceFrame =
+				frame instanceof CompactSourceFrame && frame.sourceId === sourceId
 					? frame
-					: {
-							...frame,
+					: new CompactSourceFrame(
+							frame.id,
 							sourceId,
-						};
+							frameStartLine,
+							frameStartCol,
+							frameStartPos,
+							frameStartRange,
+							frameEndLine,
+							frameEndCol,
+							frameEndPos,
+							frameEndRange,
+						);
 			const frameHash = normalizedFrame.id;
-			if (hashes) {
-				hashes.add(frameHash);
-			}
 
 			const candidates = this.framesByHash.get(frameHash);
 
@@ -707,7 +741,7 @@ export class SourceAwareCloneIndex {
 				continue;
 			}
 
-			const matchedFrames: SourceFrame[] = candidates
+			const matchedFrames: CompactSourceFrame[] = candidates
 				? Array.isArray(candidates)
 					? candidates
 					: [candidates]
@@ -735,45 +769,15 @@ export class SourceAwareCloneIndex {
 
 			const nextActiveClones = new Map<string, ActiveCloneCandidate>();
 
-			const frameStartLine =
-				normalizedFrame.start.loc?.start.line ??
-				normalizedFrame.start.line ??
-				1;
-			const frameStartCol =
-				normalizedFrame.start.loc?.start.column ??
-				normalizedFrame.start.column ??
-				1;
-			const frameStartPos =
-				normalizedFrame.start.loc?.start.position ??
-				normalizedFrame.start.position;
-			const frameEndLine =
-				normalizedFrame.end.loc?.end.line ??
-				normalizedFrame.end.line ??
-				frameStartLine;
-			const frameEndCol =
-				normalizedFrame.end.loc?.end.column ??
-				normalizedFrame.end.column ??
-				frameStartCol;
-			const frameEndPos =
-				normalizedFrame.end.loc?.end.position ?? normalizedFrame.end.position;
-
 			for (const targetFrame of matchedFrames) {
-				const targetStartLine =
-					targetFrame.start.loc?.start.line ?? targetFrame.start.line ?? 1;
-				const targetStartCol =
-					targetFrame.start.loc?.start.column ?? targetFrame.start.column ?? 1;
-				const targetStartPos =
-					targetFrame.start.loc?.start.position ?? targetFrame.start.position;
-				const targetEndLine =
-					targetFrame.end.loc?.end.line ??
-					targetFrame.end.line ??
-					targetStartLine;
-				const targetEndCol =
-					targetFrame.end.loc?.end.column ??
-					targetFrame.end.column ??
-					targetStartCol;
-				const targetEndPos =
-					targetFrame.end.loc?.end.position ?? targetFrame.end.position;
+				const targetStartLine = targetFrame.startLine;
+				const targetStartCol = targetFrame.startCol;
+				const targetStartPos = targetFrame.startPos;
+				const targetStartRange = targetFrame.startRange;
+				const targetEndLine = targetFrame.endLine;
+				const targetEndCol = targetFrame.endCol;
+				const targetEndPos = targetFrame.endPos;
+				const targetEndRange = targetFrame.endRange;
 
 				// Disallow exact self-match at identical line/column position
 				if (
@@ -784,13 +788,12 @@ export class SourceAwareCloneIndex {
 					continue;
 				}
 
-				const offsetKey = `${targetFrame.sourceId}:${targetFrame.start.range[0] - normalizedFrame.start.range[0]}`;
+				const offsetKey = `${targetFrame.sourceId}:${targetStartRange - frameStartRange}`;
 
 				if (activeClones.has(offsetKey)) {
 					const candidate = activeClones.get(offsetKey)!;
 					if (candidate.clone.duplicationA.range) {
-						candidate.clone.duplicationA.range[1] =
-							normalizedFrame.end.range[1];
+						candidate.clone.duplicationA.range[1] = frameEndRange;
 					}
 					candidate.clone.duplicationA.end = {
 						line: frameEndLine,
@@ -798,15 +801,15 @@ export class SourceAwareCloneIndex {
 						position: frameEndPos,
 					};
 					if (candidate.clone.duplicationB.range) {
-						candidate.clone.duplicationB.range[1] = targetFrame.end.range[1];
+						candidate.clone.duplicationB.range[1] = targetEndRange;
 					}
 					candidate.clone.duplicationB.end = {
 						line: targetEndLine,
 						column: targetEndCol,
 						position: targetEndPos,
 					};
-					candidate.lastSourceEndRange = normalizedFrame.end.range[1];
-					candidate.lastTargetEndRange = targetFrame.end.range[1];
+					candidate.lastSourceEndRange = frameEndRange;
+					candidate.lastTargetEndRange = targetEndRange;
 					nextActiveClones.set(offsetKey, candidate);
 				} else {
 					const clone: IClone = {
@@ -824,10 +827,7 @@ export class SourceAwareCloneIndex {
 								column: frameEndCol,
 								position: frameEndPos,
 							},
-							range: [
-								normalizedFrame.start.range[0],
-								normalizedFrame.end.range[1],
-							],
+							range: [frameStartRange, frameEndRange],
 						},
 						duplicationB: {
 							sourceId: targetFrame.sourceId,
@@ -841,15 +841,15 @@ export class SourceAwareCloneIndex {
 								column: targetEndCol,
 								position: targetEndPos,
 							},
-							range: [targetFrame.start.range[0], targetFrame.end.range[1]],
+							range: [targetStartRange, targetEndRange],
 						},
 					};
 
 					nextActiveClones.set(offsetKey, {
 						clone,
 						targetFrame,
-						lastSourceEndRange: normalizedFrame.end.range[1],
-						lastTargetEndRange: targetFrame.end.range[1],
+						lastSourceEndRange: frameEndRange,
+						lastTargetEndRange: targetEndRange,
 					});
 				}
 			}
@@ -879,7 +879,8 @@ export class SourceAwareCloneIndex {
 
 		return detectedClones;
 	}
-	#insertFrame(hash: string, frame: SourceFrame): void {
+
+	#insertFrame(hash: string, frame: CompactSourceFrame): void {
 		const existing = this.framesByHash.get(hash);
 		if (!existing) {
 			this.framesByHash.set(hash, frame);
@@ -889,8 +890,7 @@ export class SourceAwareCloneIndex {
 		if (Array.isArray(existing)) {
 			const alreadyPresent = existing.some(
 				(f) =>
-					f.sourceId === frame.sourceId &&
-					f.start.range[0] === frame.start.range[0],
+					f.sourceId === frame.sourceId && f.startRange === frame.startRange,
 			);
 			if (!alreadyPresent) {
 				existing.push(frame);
@@ -898,7 +898,7 @@ export class SourceAwareCloneIndex {
 		} else {
 			if (
 				existing.sourceId !== frame.sourceId ||
-				existing.start.range[0] !== frame.start.range[0]
+				existing.startRange !== frame.startRange
 			) {
 				this.framesByHash.set(hash, [existing, frame]);
 			}
