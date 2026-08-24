@@ -241,24 +241,7 @@ export function validateTransactionPayload(tx: { id: string; amount: number; sen
 			mockCtx,
 		)) as ToolResultEventResult | undefined;
 		expect(secondResult).toBeUndefined();
-
-		// Detect tool execute
-		expect(harness.registeredTools.length).toBe(1);
-		const detectTool = harness.registeredTools[0]!;
-		const toolOutcome = await detectTool.execute(
-			"call_tool_1",
-			{},
-			undefined,
-			undefined,
-			mockCtx as ExtensionContext,
-		);
-
-		expect(toolOutcome.content.length).toBe(1);
-		const firstToolItem = toolOutcome.content[0] as ToolTextContent;
-		expect(firstToolItem.type).toBe("text");
-		expect(firstToolItem.text).toContain("# Duplicate Code Report");
-		expect(firstToolItem.text).toContain("order-validator.ts");
-		expect(firstToolItem.text).toContain("transaction-validator.ts");
+		expect(harness.registeredTools.length).toBe(0);
 	});
 
 	it("injects system reminder into tool_result in in-band mode", async () => {
@@ -494,49 +477,105 @@ export function testMutation(): void {
 		expect(warnings.length).toBe(0);
 	});
 
-	it("preserves active OMP settings as overrides when detect_duplicates scans a subproject", async () => {
-		const subprojectDir = path.join(tempDir, "subproject");
-		await fs.mkdir(subprojectDir, { recursive: true });
+	it("toggles duplicate detector on and off per project via /duplicates command", async () => {
+		const harness = createMockHarness();
+		duplicateDetectorExtension(harness.api);
+		const mockCtx = await harness.startSession(tempDir);
 
-		await Bun.write(
-			path.join(subprojectDir, ".jscpd.json"),
-			JSON.stringify({ minLines: 20, minTokens: 100 }),
+		const cmd = harness.registeredCommands["duplicates"];
+		expect(cmd).toBeDefined();
+
+		// Check initial status
+		await cmd.handler?.("status", mockCtx as never);
+		const initialNotifs = harness.uiNotifications.filter((n) =>
+			n.message.includes("currently enabled"),
 		);
+		expect(initialNotifs.length).toBe(1);
+
+		// Turn off
+		await cmd.handler?.("off", mockCtx as never);
+		const offNotifs = harness.uiNotifications.filter(
+			(n) => n.message === "Duplicate detector disabled for this project.",
+		);
+		expect(offNotifs.length).toBe(1);
+
+		// Check status after turning off
+		await cmd.handler?.("", mockCtx as never);
+		const disabledNotifs = harness.uiNotifications.filter((n) =>
+			n.message.includes("currently disabled"),
+		);
+		expect(disabledNotifs.length).toBe(1);
+
+		// Turn back on
+		await cmd.handler?.("on", mockCtx as never);
+		const onNotifs = harness.uiNotifications.filter(
+			(n) => n.message === "Duplicate detector enabled for this project.",
+		);
+		expect(onNotifs.length).toBe(1);
+	});
+
+	it("suppresses indexing and mutation warnings when project is disabled persistently", async () => {
+		const disabledDir = path.join(tempDir, "disabled-project");
+		await fs.mkdir(disabledDir, { recursive: true });
 
 		const code = `
-export function simpleHelperFunction(x: number, y: number, z: number): number {
-	const val1 = x * 2;
-	const val2 = y * 3;
-	const val3 = z * 4;
-	return val1 + val2 + val3;
+export function orderTaxProcessor(items: Array<{ price: number; tax: number }>): number {
+	let sum = 0;
+	for (const item of items) {
+		sum += item.price * item.tax;
+	}
+	return sum;
 }
 `;
-		await Bun.write(path.join(subprojectDir, "a.ts"), code);
-		await Bun.write(path.join(subprojectDir, "b.ts"), code);
-		await gitTrack(tempDir);
+		await Bun.write(path.join(disabledDir, "tax1.ts"), code);
+		await gitTrack(disabledDir);
+
+		// Disable the project persistently first
+		const { setProjectEnabled } = await import("../src/project-state");
+		await setProjectEnabled(disabledDir, false);
 
 		const harness = createMockHarness();
 		duplicateDetectorExtension(harness.api);
-		const mockCtx = await harness.startSession(tempDir, {
-			minLines: 4,
-			minTokens: 15,
-		});
+		const mockCtx = await harness.startSession(disabledDir);
 
-		const detectTool = harness.registeredTools[0]!;
-		const outcome = await detectTool.execute(
-			"call_subproject",
-			{ path: "subproject" },
-			undefined,
-			undefined,
-			mockCtx as ExtensionContext,
+		// Verify disabled status was sent
+		const statusMessages = harness.sentMessages.filter(
+			(m) => m.msg.customType === "duplicate-detector-status",
+		);
+		expect(
+			statusMessages.some((m) =>
+				String(m.msg.content).includes("Disabled for this project"),
+			),
+		).toBe(true);
+
+		// Write duplicate file
+		await Bun.write(path.join(disabledDir, "tax2.ts"), code);
+		const toolResultHandlers = harness.eventHandlers["tool_result"] || [];
+		await toolResultHandlers[0]!(
+			{
+				type: "tool_result",
+				toolName: "write",
+				toolCallId: "call_write_disabled",
+				input: { path: "tax2.ts" },
+				content: [{ type: "text", text: "written" }],
+				isError: false,
+			},
+			mockCtx,
 		);
 
-		const textItem = outcome.content[0] as ToolTextContent;
-		expect(textItem.text).toContain("Detected Clones");
-		expect(textItem.text).toContain("a.ts");
-		expect(textItem.text).toContain("b.ts");
-	});
+		// Verify NO warning was generated
+		const warnings = harness.sentMessages.filter(
+			(m) => m.msg.customType === "duplicate-detector-warning",
+		);
+		expect(warnings.length).toBe(0);
 
+		// Re-enable via command
+		const cmd = harness.registeredCommands["duplicates"]!;
+		await cmd.handler?.("on", mockCtx as never);
+
+		// Clean up persistent state
+		await setProjectEnabled(disabledDir, true);
+	});
 	it("reloads project configuration on session_switch", async () => {
 		const session1Dir = path.join(tempDir, "session-1");
 		const session2Dir = path.join(tempDir, "session-2");

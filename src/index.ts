@@ -1,5 +1,4 @@
 import * as path from "node:path";
-import type { IClone } from "@jscpd/core";
 import type {
 	ExtensionAPI,
 	ExtensionContext,
@@ -14,14 +13,11 @@ import { DuplicateLedger } from "./duplicate-ledger";
 import {
 	type BaselineStatus,
 	createIgnoreFilter,
-	DEFAULT_MAX_INLINE_BYTES,
-	DEFAULT_MAX_INLINE_CLONES,
-	type FormatReportOptions,
-	formatReport,
 	isGeneratedContent,
 	JscpdIndexManager,
 	MAX_INDEXED_FILES,
 } from "./jscpd-engine";
+import { isProjectEnabled, setProjectEnabled } from "./project-state";
 import {
 	DuplicateNotificationComponent,
 	type DuplicateNotificationData,
@@ -35,6 +31,7 @@ export * from "./coordinator";
 export * from "./disk-cache";
 export * from "./duplicate-ledger";
 export * from "./jscpd-engine";
+export * from "./project-state";
 export * from "./source-aware-index";
 export * from "./tui-notification";
 export * from "./types";
@@ -211,10 +208,13 @@ export function formatBaselineMessage(
 	cachedCount?: number,
 	maxIndexedFiles?: number,
 ): string {
+	if (status === "disabled") {
+		return "Duplicate detector: Disabled for this project (use '/duplicates on' to enable)";
+	}
+
 	if (status === "skipped_not_git") {
 		return "Duplicate detector: Baseline skipped (not a Git repository; mutation checks active)";
 	}
-
 	const fileWord = count === 1 ? "file" : "files";
 	const formattedCount = count.toLocaleString();
 
@@ -298,10 +298,9 @@ function notifyBaselineStatus(
  * Main extension factory for oh-my-pi duplicate detector plugin powered by jscpd.
  */
 export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
-	const z = pi.zod;
-
 	pi.setLabel("Duplicate Detector");
 
+	let isEnabledForProject = true;
 	let activeRawSettings: Record<string, unknown> | undefined;
 	let config: DuplicateDetectorConfig = { ...DEFAULT_CONFIG };
 	let currentCwd: string = process.cwd();
@@ -309,7 +308,6 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 	const ledger = new DuplicateLedger();
 	const fileRevisions = new Map<string, number>();
 	const coordinator = new DuplicateDetectorCoordinator();
-
 	let workerFailureNotified = false;
 	const notifyWorkerFailure = (error: unknown): void => {
 		if (workerFailureNotified || !lastCtx) return;
@@ -342,6 +340,7 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 	});
 
 	coordinator.on("complete", (payload) => {
+		if (!isEnabledForProject) return;
 		const status: BaselineStatus = payload.status ?? "complete";
 		if (status === "failed") {
 			notifyWorkerFailure(payload.error ?? "Baseline indexing failed");
@@ -375,8 +374,8 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 	});
 
 	coordinator.on("lateFinding", async ({ clone }) => {
+		if (!isEnabledForProject) return;
 		if (!config.checkOnMutation || config.reminderMode === "none") return;
-
 		const sourceA = clone.duplicationA.sourceId;
 		const sourceB = clone.duplicationB.sourceId;
 
@@ -459,6 +458,15 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 		config = resolveConfig(activeRawSettings, projectConfig);
 
 		if (ctx?.cwd) {
+			isEnabledForProject = await isProjectEnabled(ctx.cwd);
+			if (!isEnabledForProject) {
+				pi.logger.info("Duplicate detector is disabled for this project", {
+					cwd: ctx.cwd,
+				});
+				notifyBaselineStatus(pi, lastCtx, "disabled", 0);
+				return;
+			}
+
 			try {
 				await coordinator.openWorkspace(ctx.cwd, config);
 			} catch (err) {
@@ -506,6 +514,15 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 			});
 		}
 
+		isEnabledForProject = await isProjectEnabled(ctx.cwd);
+		if (!isEnabledForProject) {
+			pi.logger.info("Duplicate detector is disabled for this project", {
+				cwd: ctx.cwd,
+			});
+			notifyBaselineStatus(pi, lastCtx, "disabled", 0);
+			return;
+		}
+
 		try {
 			await coordinator.openWorkspace(ctx.cwd, config);
 		} catch (err) {
@@ -521,6 +538,7 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 		"tool_result",
 		async (event, ctx): Promise<ToolResultEventResult | void> => {
 			if (event.isError) return;
+			if (!isEnabledForProject) return;
 			if (!config.checkOnMutation) return;
 			if (config.reminderMode === "none") return;
 			if (event.toolName !== "write" && event.toolName !== "edit") return;
@@ -661,290 +679,54 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 			}
 		},
 	);
-
-	// Register LLM-callable tool
-	async function executeScan(
-		targetPath: string,
-		options: { minLines?: number; minTokens?: number } = {},
-		scanCtx?: {
-			sessionManager?: {
-				saveArtifact?: (
-					content: string,
-					toolType: string,
-				) => Promise<string | undefined>;
-			};
-		},
-	): Promise<{
-		clones: IClone[];
-		report: string;
-		fullReport: string;
-		artifactId?: string;
-		configSource: string | null;
-	}> {
-		const projectConfig =
-			targetPath !== currentCwd
-				? await findProjectJscpdConfig(targetPath)
-				: null;
-		const effectiveConfig = projectConfig
-			? resolveConfig(activeRawSettings, projectConfig)
-			: config;
-
-		const minLines =
-			typeof options.minLines === "number"
-				? Math.max(3, options.minLines)
-				: effectiveConfig.minLines;
-
-		const minTokens =
-			typeof options.minTokens === "number"
-				? Math.max(10, options.minTokens)
-				: effectiveConfig.minTokens;
-
-		const combinedIgnores = Array.from(
-			new Set([
-				...config.ignorePatterns,
-				...(effectiveConfig.ignorePatterns || []),
-			]),
-		);
-
-		let clones: IClone[] = [];
-		const isCustomScan =
-			targetPath !== currentCwd ||
-			minLines !== config.minLines ||
-			minTokens !== config.minTokens ||
-			combinedIgnores.length !== config.ignorePatterns.length;
-
-		if (isCustomScan) {
-			clones = await coordinator.scan({
-				targetPath,
-				options: {
-					minLines,
-					minTokens,
-					maxLines: effectiveConfig.maxLines,
-					ignorePatterns: combinedIgnores,
-					formatsExts: effectiveConfig.formatsExts,
-				},
-			});
-		} else {
-			clones = await coordinator.scan();
-		}
-
-		const fullReport = formatReport(clones, targetPath, {
-			minLines,
-			minTokens,
-		});
-
-		let artifactId: string | undefined;
-		const fullReportBytes = Buffer.byteLength(fullReport, "utf-8");
-		const needsTruncation =
-			clones.length > DEFAULT_MAX_INLINE_CLONES ||
-			fullReportBytes > DEFAULT_MAX_INLINE_BYTES;
-
-		if (needsTruncation && scanCtx?.sessionManager?.saveArtifact) {
-			try {
-				artifactId = await scanCtx.sessionManager.saveArtifact(
-					fullReport,
-					"duplicates",
-				);
-			} catch (err) {
-				pi.logger.warn(
-					"Failed to persist duplicates report to session artifact",
-					{
-						error: err instanceof Error ? err.message : String(err),
-					},
-				);
-			}
-		}
-
-		const report = needsTruncation
-			? formatReport(clones, targetPath, {
-					minLines,
-					minTokens,
-					maxClones: DEFAULT_MAX_INLINE_CLONES,
-					maxBytes: DEFAULT_MAX_INLINE_BYTES,
-					artifactId,
-				})
-			: fullReport;
-
-		return {
-			clones,
-			report,
-			fullReport,
-			artifactId,
-			configSource: effectiveConfig.configSource ?? null,
-		};
-	}
-
-	// Register LLM-callable tool
-	pi.registerTool({
-		name: "detect_duplicates",
-		label: "Detect Duplicates",
-		description:
-			"Scan the codebase or a target directory for duplicate code blocks, copy-pasted logic, and code clones using jscpd.",
-		parameters: z.object({
-			path: z
-				.string()
-				.optional()
-				.describe(
-					"Root directory or path to scan (defaults to project workspace root)",
-				),
-			minLines: z
-				.number()
-				.optional()
-				.describe(
-					"Minimum number of consecutive matching lines to report (default: 5)",
-				),
-			minTokens: z
-				.number()
-				.optional()
-				.describe(
-					"Minimum token count threshold for a clone block (default: 40)",
-				),
-		}),
-		async execute(
-			_toolCallId,
-			params: { path?: string; minLines?: number; minTokens?: number },
-			signal,
-			onUpdate,
-			ctx,
-		) {
-			if (signal?.aborted) {
-				return {
-					content: [
-						{ type: "text", text: "Duplicate detection scan cancelled." },
-					],
-					details: null,
-				};
-			}
-
-			onUpdate?.({
-				content: [
-					{
-						type: "text",
-						text: "Scanning codebase for duplicate code blocks via jscpd...",
-					},
-				],
-			});
-
-			const scanPath = params.path
-				? path.isAbsolute(params.path)
-					? params.path
-					: path.join(ctx.cwd, params.path)
-				: ctx.cwd;
-
-			try {
-				const { clones, report, artifactId, configSource } = await executeScan(
-					scanPath,
-					{
-						minLines: params.minLines,
-						minTokens: params.minTokens,
-					},
-					ctx,
-				);
-
-				if (signal?.aborted) {
-					return {
-						content: [
-							{ type: "text", text: "Duplicate detection scan cancelled." },
-						],
-						details: null,
-					};
-				}
-
-				return {
-					content: [
-						{
-							type: "text",
-							text: report,
-						},
-					],
-					details: {
-						clones,
-						scanPath,
-						configSource,
-						artifactId,
-					},
-				};
-			} catch (err) {
-				const message = err instanceof Error ? err.message : String(err);
-				return {
-					content: [
-						{ type: "text", text: `Duplicate detection failed: ${message}` },
-					],
-					details: null,
-					isError: true,
-				};
-			}
-		},
-	});
-
 	// Register /duplicates slash command
 	pi.registerCommand("duplicates", {
 		description:
-			"Scan workspace for duplicate and clone code blocks (posts report into transcript without triggering an agent turn)",
+			"Toggle duplicate detector on or off for this project (/duplicates on|off)",
 		getArgumentCompletions: (prefix) => {
-			const options = ["--min-lines=5", "--min-tokens=40", "--path="];
+			const options = ["on", "off", "status"];
 			return options
-				.filter((opt) => opt.startsWith(prefix))
+				.filter((opt) => opt.startsWith(prefix.toLowerCase()))
 				.map((label) => ({
 					value: label,
 					label,
-					description: `Option: ${label}`,
+					description:
+						label === "on"
+							? "Enable duplicate detection for this project"
+							: label === "off"
+								? "Disable duplicate detection for this project"
+								: "Check duplicate detection status for this project",
 				}));
 		},
 		handler: async (args, ctx) => {
-			ctx.ui.notify("Scanning workspace for duplicate code...", "info");
-
-			let targetPath = ctx.cwd;
-			let cliMinLines: number | undefined;
-			let cliMinTokens: number | undefined;
-
-			const parts = args.trim().split(/\s+/).filter(Boolean);
-			for (const part of parts) {
-				if (part.startsWith("--min-lines=")) {
-					const val = Number.parseInt(part.slice("--min-lines=".length), 10);
-					if (!Number.isNaN(val)) cliMinLines = Math.max(3, val);
-				} else if (part.startsWith("--min-tokens=")) {
-					const val = Number.parseInt(part.slice("--min-tokens=".length), 10);
-					if (!Number.isNaN(val)) cliMinTokens = Math.max(10, val);
-				} else if (part.startsWith("--path=")) {
-					targetPath = path.resolve(ctx.cwd, part.slice("--path=".length));
-				} else if (!part.startsWith("-")) {
-					targetPath = path.resolve(ctx.cwd, part);
+			const action = args.trim().toLowerCase();
+			if (action === "on") {
+				await setProjectEnabled(ctx.cwd, true);
+				isEnabledForProject = true;
+				ctx.ui.notify("Duplicate detector enabled for this project.", "info");
+				try {
+					await coordinator.openWorkspace(ctx.cwd, config);
+				} catch (err) {
+					notifyWorkerFailure(err);
 				}
-			}
-
-			try {
-				const { clones, report, artifactId } = await executeScan(
-					targetPath,
-					{
-						minLines: cliMinLines,
-						minTokens: cliMinTokens,
-					},
-					ctx,
-				);
-
-				pi.sendMessage(
-					{
-						customType: "duplicate-detector-report",
-						content: report,
-						display: true,
-						attribution: "user",
-						details: {
-							filePath: targetPath,
-							clones,
-							content: report,
-							artifactId,
-						},
-					},
-					{ triggerTurn: false },
-				);
+			} else if (action === "off") {
+				await setProjectEnabled(ctx.cwd, false);
+				isEnabledForProject = false;
+				ledger.clear();
+				fileRevisions.clear();
+				ctx.ui.notify("Duplicate detector disabled for this project.", "info");
+				notifyBaselineStatus(pi, ctx as ExtensionContext, "disabled", 0);
+			} else if (action === "status" || action === "") {
+				const enabled = await isProjectEnabled(ctx.cwd);
 				ctx.ui.notify(
-					`Duplicate scan finished: ${clones.length} duplicate cluster${clones.length === 1 ? "" : "s"} found.`,
-					clones.length > 0 ? "warning" : "info",
+					`Duplicate detector is currently ${enabled ? "enabled" : "disabled"} for this project. Usage: /duplicates on|off`,
+					"info",
 				);
-			} catch (err) {
-				const message = err instanceof Error ? err.message : String(err);
-				ctx.ui.notify(`Duplicate scan failed: ${message}`, "error");
+			} else {
+				ctx.ui.notify(
+					`Unknown argument "${args.trim()}". Usage: /duplicates on|off`,
+					"error",
+				);
 			}
 		},
 	});

@@ -31,8 +31,8 @@ export type BaselineStatus =
 	| "capped_file_count"
 	| "capped_source_bytes"
 	| "failed"
-	| "cancelled";
-
+	| "cancelled"
+	| "disabled";
 /** Maximum file size in bytes to tokenize (100 KiB matches jscpd defaults) */
 export const MAX_FILE_SIZE_BYTES = 100 * 1024;
 

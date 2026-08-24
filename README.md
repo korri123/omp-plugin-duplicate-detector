@@ -2,10 +2,9 @@
 
 Real-time duplicate code detection for [oh-my-pi](https://github.com/oh-my-pi/oh-my-pi) (`omp`), built on [jscpd](https://github.com/kucherenko/jscpd).
 
-The plugin indexes your repository in the background and watches the agent as it works. When newly written or edited code duplicates existing logic anywhere in the workspace, the agent is warned immediately, before the copy-paste hardens into a maintenance problem. You can also run scans on demand, either interactively or as an agent tool.
+The plugin indexes your repository in the background and watches the agent as it works. When newly written or edited code duplicates existing logic anywhere in the workspace, the agent is warned immediately, before the copy-paste hardens into a maintenance problem. Duplicate detection can be toggled on or off per project using `/duplicates on|off`.
 
-Indexing and scanning run entirely in a background worker with a persistent on-disk cache, so sessions start instantly and the agent loop is never blocked, even in large repositories.
-
+Indexing and mutation checks run entirely in a background worker with a persistent on-disk cache, so sessions start instantly and the agent loop is never blocked, even in large repositories.
 ## Installation
 
 Link the plugin into your local `omp` registry:
@@ -43,18 +42,13 @@ Previously reported duplicates are remembered per session, so iterative edits to
 
 ### `/duplicates` slash command
 
-Scan interactively from the chat. The report is posted into the transcript without triggering an agent turn.
+Toggle duplicate detection on or off on a per-project basis. The preference is stored persistently in `~/.cache/omp/duplicate-detector/projects.json`.
 
 ```text
-/duplicates                          # scan the whole workspace
-/duplicates src/services/            # scan a directory
-/duplicates --min-lines=8 --min-tokens=50
+/duplicates on                           # enable duplicate detector for this project
+/duplicates off                          # disable duplicate detector for this project
+/duplicates status                       # show current status for this project
 ```
-
-### `detect_duplicates` agent tool
-
-The agent can audit for duplication itself — before or after a refactor. The tool takes an optional `path`, `minLines`, and `minTokens` and returns a markdown report listing each clone pair with file locations and a code excerpt. Oversized reports are truncated inline and stored in full as a session artifact.
-
 ## Configuration
 
 Plugin settings (via the extension's `settings` in your omp config):
@@ -84,7 +78,7 @@ By default only real programming languages are tokenized; documentation, markup,
 
 ## Scope and performance
 
-- Only Git-tracked files are indexed (`git ls-files`); outside a Git repository, baseline scanning is skipped and only on-demand scans work.
+- Only Git-tracked files are indexed (`git ls-files`); outside a Git repository, baseline scanning is skipped.
 - Hard caps on file size, file count, and total indexed bytes prevent runaway memory use in large monorepos.
 - Tokenized files are cached on disk per workspace with size-bounded eviction, so repeat sessions skip re-tokenization entirely.
 

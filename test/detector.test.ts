@@ -152,8 +152,7 @@ export function calculateTax(amount: number): number {
 
 		duplicateDetectorExtension(mockPi);
 
-		expect(registeredTools.length).toBe(1);
-		expect(registeredTools[0]?.name).toBe("detect_duplicates");
+		expect(registeredTools.length).toBe(0);
 		expect(registeredCommands["duplicates"]).toBeDefined();
 		expect(registeredRenderers["duplicate-detector-warning"]).toBeDefined();
 		expect(registeredRenderers["duplicate-detector-report"]).toBeDefined();

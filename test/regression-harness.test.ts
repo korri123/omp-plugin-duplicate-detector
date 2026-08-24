@@ -380,8 +380,8 @@ describe("Phase 0 Regression Test Harness", () => {
 				mockCtx,
 			);
 
-			// In Phase 0, verify the tool handler executed cleanly without error
-			expect(harness.registeredTools.length).toBe(1);
+			// Verify no LLM tool is registered
+			expect(harness.registeredTools.length).toBe(0);
 		});
 	});
 

@@ -1,7 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import type { IClone } from "@jscpd/core";
 import type {
-	CustomMessagePayload,
 	ExtensionAPI,
 	RegisteredCommand,
 } from "@oh-my-pi/pi-coding-agent";
@@ -181,20 +180,8 @@ describe("Artifact & Truncation System", () => {
 	});
 
 	describe("Extension integration with artifact saving", () => {
-		it("saves artifact via ctx.sessionManager when /duplicates runs on many clones", async () => {
-			let savedArtifactContent = "";
-			let savedArtifactToolType = "";
-
-			const mockSessionManager = {
-				saveArtifact: async (content: string, toolType: string) => {
-					savedArtifactContent = content;
-					savedArtifactToolType = toolType;
-					return "7";
-				},
-			};
-
+		it("registers duplicates command and provides on/off argument completions", () => {
 			const registeredCommands: Record<string, RegisteredCommand> = {};
-			let sentMessage: CustomMessagePayload | null = null;
 
 			const mockPi = {
 				zod: z,
@@ -209,31 +196,18 @@ describe("Artifact & Truncation System", () => {
 				registerCommand: (name: string, def: RegisteredCommand) => {
 					registeredCommands[name] = def;
 				},
-				sendMessage: (msg: CustomMessagePayload) => {
-					sentMessage = msg;
-				},
+				sendMessage: () => {},
 				on: () => {},
 			} as unknown as ExtensionAPI;
 			duplicateDetectorExtension(mockPi);
 
 			const cmd = registeredCommands["duplicates"];
 			expect(cmd).toBeDefined();
-
-			const mockCtx = {
-				cwd: process.cwd(),
-				ui: { notify: () => {} },
-				sessionManager: mockSessionManager,
-			};
-
-			await cmd.handler("", mockCtx as never);
-
-			expect(sentMessage).toBeDefined();
-			const payload = sentMessage as { customType?: string } | null;
-			expect(payload?.customType).toBe("duplicate-detector-report");
-			expect(savedArtifactContent.length).toBeGreaterThanOrEqual(0);
-			expect(savedArtifactToolType.length).toBeGreaterThanOrEqual(0);
+			expect(cmd.description).toContain("Toggle duplicate detector");
+			const completions = cmd.getArgumentCompletions?.("o") ?? [];
+			expect(completions.some((c) => c.value === "on")).toBe(true);
+			expect(completions.some((c) => c.value === "off")).toBe(true);
 		});
-
 		it("registers tool_result event handler for mutation checking", () => {
 			const eventHandlers: Record<
 				string,
