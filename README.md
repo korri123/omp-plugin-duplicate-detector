@@ -2,6 +2,8 @@
 
 Real-time duplicate code detection for [oh-my-pi](https://github.com/oh-my-pi/oh-my-pi) (`omp`), built on [jscpd](https://github.com/kucherenko/jscpd).
 
+<img width="717" height="254" alt="image" src="https://github.com/user-attachments/assets/d4673964-1842-4a38-93de-72772edede98" />
+
 The plugin indexes your repository in the background and watches the agent as it works. When newly written or edited code duplicates existing logic anywhere in the workspace, the agent is warned immediately, before the copy-paste hardens into a maintenance problem. Duplicate detection can be toggled on or off per project using `/duplicates on|off`.
 
 Indexing and mutation checks run entirely in a background worker with a persistent on-disk cache, so sessions start instantly and the agent loop is never blocked, even in large repositories.
