@@ -1,6 +1,6 @@
 # omp-plugin-duplicate-detector
 
-Real-time duplicate code detection for [oh-my-pi](https://github.com/oh-my-pi/oh-my-pi) (`omp`), built on [jscpd](https://github.com/kucherenko/jscpd).
+Real-time duplicate code detection for [oh-my-pi](https://github.com/can1357/oh-my-pi) (`omp`), built on [jscpd](https://github.com/kucherenko/jscpd).
 
 <img width="717" height="254" alt="image" src="https://github.com/user-attachments/assets/d4673964-1842-4a38-93de-72772edede98" />
 
