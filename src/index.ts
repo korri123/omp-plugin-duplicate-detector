@@ -13,7 +13,9 @@ import { DuplicateLedger } from "./duplicate-ledger";
 import {
 	type BaselineStatus,
 	createIgnoreFilter,
+	execGit,
 	isGeneratedContent,
+	isInsideGitWorkTree,
 	MAX_INDEXED_FILES,
 } from "./jscpd-engine";
 import { isProjectEnabled, setProjectEnabled } from "./project-state";
@@ -335,7 +337,105 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 	const ledger = new DuplicateLedger();
 	const fileRevisions = new Map<string, number>();
 	const coordinator = new DuplicateDetectorCoordinator();
+	let lastKnownHead: string | null = null;
 	let workerFailureNotified = false;
+
+	const reconcileParentGitState = async (cwd: string): Promise<void> => {
+		if (!isEnabledForProject) return;
+		try {
+			const isGit = await isInsideGitWorkTree(cwd);
+			if (!isGit) return;
+
+			const { stdout: currentHeadRaw } = await execGit(
+				["rev-parse", "HEAD"],
+				cwd,
+			).catch(() => ({ stdout: "" }));
+			const currentHead = currentHeadRaw.trim();
+
+			const modifiedFiles: string[] = [];
+			let reconciliationSucceeded = true;
+
+			if (lastKnownHead && currentHead && lastKnownHead !== currentHead) {
+				try {
+					const { stdout: diffOut } = await execGit(
+						[
+							"diff",
+							"--name-status",
+							"-z",
+							lastKnownHead,
+							currentHead,
+							"--",
+							".",
+						],
+						cwd,
+					);
+
+					const tokens = diffOut.split("\0");
+					let t = 0;
+					while (t < tokens.length) {
+						const status = tokens[t]?.trim();
+						t++;
+						if (!status) continue;
+						if (status.startsWith("R") || status.startsWith("C")) {
+							const oldPath = tokens[t]?.trim();
+							t++;
+							const newPath = tokens[t]?.trim();
+							t++;
+							if (oldPath) modifiedFiles.push(path.resolve(cwd, oldPath));
+							if (newPath) modifiedFiles.push(path.resolve(cwd, newPath));
+						} else {
+							const filePath = tokens[t]?.trim();
+							t++;
+							if (filePath) modifiedFiles.push(path.resolve(cwd, filePath));
+						}
+					}
+				} catch {
+					reconciliationSucceeded = false;
+				}
+			}
+			const { stdout: statusOut } = await execGit(
+				["status", "--porcelain", "-z", "--untracked-files=no", "--", "."],
+				cwd,
+			).catch(() => ({ stdout: "" }));
+
+			const statusEntries = statusOut.split("\0");
+			let i = 0;
+			while (i < statusEntries.length) {
+				const entry = statusEntries[i];
+				i++;
+				if (!entry || entry.length < 4) continue;
+				const statusCode = entry.slice(0, 2);
+				const relPath = entry.slice(3).trim();
+				if (statusCode.includes("R") && i < statusEntries.length) {
+					const oldRelPath = statusEntries[i]?.trim();
+					i++;
+					if (oldRelPath) {
+						modifiedFiles.push(path.resolve(cwd, oldRelPath));
+					}
+				}
+				if (relPath) {
+					modifiedFiles.push(path.resolve(cwd, relPath));
+				}
+			}
+			if (modifiedFiles.length > 0) {
+				const uniqueFiles = [...new Set(modifiedFiles)];
+				try {
+					await coordinator.reconcile(
+						uniqueFiles.map((filePath) => ({ filePath })),
+					);
+				} catch {
+					reconciliationSucceeded = false;
+				}
+			}
+
+			// Only advance the watermark when reconciliation succeeded
+			if (reconciliationSucceeded && currentHead) {
+				lastKnownHead = currentHead;
+			}
+		} catch {
+			// Fail open
+		}
+	};
 	const notifyWorkerFailure = (error: unknown): void => {
 		if (workerFailureNotified || !lastCtx) return;
 		workerFailureNotified = true;
@@ -473,17 +573,26 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 		ledger.clear();
 		fileRevisions.clear();
 		workerFailureNotified = false;
+		lastKnownHead = null;
 		if (ctx?.cwd) {
 			currentCwd = ctx.cwd;
+			execGit(["rev-parse", "HEAD"], ctx.cwd)
+				.then(({ stdout }) => {
+					lastKnownHead = stdout.trim() || null;
+				})
+				.catch(() => {
+					lastKnownHead = null;
+				});
 		}
 		lastCtx = ctx as ExtensionContext;
-
 		activeRawSettings = extractSettingsObject(event, ctx);
+		config = resolveConfig(activeRawSettings, null);
 		const projectConfig = ctx?.cwd
 			? await findProjectJscpdConfig(ctx.cwd)
 			: null;
-		config = resolveConfig(activeRawSettings, projectConfig);
-
+		if (projectConfig) {
+			config = resolveConfig(activeRawSettings, projectConfig);
+		}
 		if (ctx?.cwd) {
 			isEnabledForProject = await isProjectEnabled(ctx.cwd);
 			if (!isEnabledForProject) {
@@ -517,6 +626,13 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 		});
 	}
 
+	// Trigger parent git reconciliation on turn start
+	pi.on("before_agent_start", async (_event, ctx) => {
+		if (ctx?.cwd) {
+			await reconcileParentGitState(ctx.cwd);
+		}
+	});
+
 	// Initialize repository index in background on session start (non-blocking)
 	pi.on("session_start", async (event, ctx) => {
 		currentCwd = ctx.cwd;
@@ -524,14 +640,23 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 		fileRevisions.clear();
 		workerFailureNotified = false;
 
+		execGit(["rev-parse", "HEAD"], ctx.cwd)
+			.then(({ stdout }) => {
+				lastKnownHead = stdout.trim() || null;
+			})
+			.catch(() => {
+				lastKnownHead = null;
+			});
 		pi.logger.debug("Duplicate detector initializing workspace index", {
 			cwd: ctx.cwd,
 		});
 
 		activeRawSettings = extractSettingsObject(event, ctx);
+		config = resolveConfig(activeRawSettings, null);
 		const projectConfig = await findProjectJscpdConfig(ctx.cwd);
-		config = resolveConfig(activeRawSettings, projectConfig);
-
+		if (projectConfig) {
+			config = resolveConfig(activeRawSettings, projectConfig);
+		}
 		if (config.configSource) {
 			pi.logger.info("Duplicate detector loaded project configuration", {
 				source: config.configSource,
@@ -568,12 +693,14 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 			if (!isEnabledForProject) return;
 			if (!config.checkOnMutation) return;
 			if (config.reminderMode === "none") return;
+			if (event.toolName === "task" || event.toolName === "bash") {
+				await reconcileParentGitState(ctx.cwd);
+				return;
+			}
 			if (event.toolName !== "write" && event.toolName !== "edit") return;
-
 			const input = event.input as { path?: string };
 			const rawPath = input?.path;
 			if (!rawPath || typeof rawPath !== "string") return;
-
 			// Skip internal protocol URLs (e.g. xd://, local://)
 			if (rawPath.includes("://")) return;
 

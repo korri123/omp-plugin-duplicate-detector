@@ -21,10 +21,13 @@ import {
 import type { WorkspaceOptions } from "./worker-protocol";
 
 const DEFAULT_MAX_CACHE_BYTES = 250 * 1024 * 1024; // 250 MB
+export const TOKENIZER_CACHE_VERSION = "4.0";
 
 export interface DiskCacheOptions {
 	/** Root directory of the workspace */
 	rootDir: string;
+	/** Stable repository key (from resolveRepositoryContext) */
+	repositoryKey?: string;
 	/** Custom base cache directory (defaults to OS user cache directory) */
 	cacheDir?: string;
 	/** Detector configuration used to compute configuration fingerprint */
@@ -65,7 +68,7 @@ export function getDefaultCacheDir(): string {
 export function computeConfigFingerprint(
 	config?: WorkspaceOptions | SourceAwareIndexOptions,
 ): string {
-	if (!config) return "default";
+	if (!config) return `default_${TOKENIZER_CACHE_VERSION}`;
 
 	let sortedFormats: Record<string, string[]> | undefined;
 	if (config.formatsExts) {
@@ -76,6 +79,7 @@ export function computeConfigFingerprint(
 	}
 
 	const canonical = {
+		version: TOKENIZER_CACHE_VERSION,
 		minTokens: config.minTokens ?? 40,
 		minLines: config.minLines ?? 5,
 		maxLines: config.maxLines ?? 500,
@@ -91,20 +95,26 @@ export function computeConfigFingerprint(
 }
 
 /**
- * Computes the workspace SQLite cache database path keyed by canonical workspace path and config fingerprint.
+ * Computes the workspace SQLite cache database path keyed by repository identity and config fingerprint.
  */
 export function computeWorkspaceCachePath(
 	baseDir: string,
-	rootDir: string,
+	repositoryKeyOrRootDir: string,
 	configFingerprint: string,
 ): string {
-	const canonicalPath = path.resolve(rootDir);
-	const workspaceHash = crypto
-		.createHash("sha256")
-		.update(canonicalPath)
-		.digest("hex")
-		.slice(0, 16);
-	return path.join(baseDir, `${workspaceHash}_${configFingerprint}.sqlite`);
+	const isKey = /^[0-9a-f]{16}$/i.test(repositoryKeyOrRootDir);
+	const repoKey = isKey
+		? repositoryKeyOrRootDir
+		: crypto
+				.createHash("sha256")
+				.update(path.resolve(repositoryKeyOrRootDir))
+				.digest("hex")
+				.slice(0, 16);
+
+	return path.join(
+		baseDir,
+		`${repoKey}_${configFingerprint}_v${CACHE_FORMAT_VERSION}.sqlite`,
+	);
 }
 
 /**
@@ -126,7 +136,7 @@ export function computeShardKey(
 export const CACHE_FORMAT_MAGIC = "DUP3";
 
 /** Current binary format & SQLite schema version */
-export const CACHE_FORMAT_VERSION = 3;
+export const CACHE_FORMAT_VERSION = 4;
 
 /**
  * Encodes a SerializedSourceShard into a high-density, zlib-compressed binary buffer (DUP3 format).
@@ -143,132 +153,94 @@ function packBinaryShardV3(
 	shard: SerializedSourceShard,
 	tokens: SerializedToken[],
 ): Buffer {
-	const srcIdBuf = Buffer.from(shard.sourceId, "utf8");
-	const formatBuf = Buffer.from(shard.format, "utf8");
-	const hashBuf = Buffer.from(shard.contentHash, "utf8");
 	const tokenCount = tokens.length;
-	const minTokens = shard.minTokens ?? 40;
+	const dictionary: string[] = [];
+	const dictMap = new Map<string, number>();
 
-	// Build dictionary of unique 20-character token hashes
-	const dict = new Map<string, number>();
-	const tokenIndices = new Uint16Array(tokenCount);
 	for (let i = 0; i < tokenCount; i++) {
 		const h = tokens[i]!.hash;
-		let idx = dict.get(h);
-		if (idx === undefined) {
-			idx = dict.size;
-			dict.set(h, idx);
+		if (!dictMap.has(h)) {
+			dictMap.set(h, dictionary.length);
+			dictionary.push(h);
 		}
-		tokenIndices[i] = idx;
 	}
 
-	const dictCount = dict.size;
-	const dictPayloadLen = dictCount * 10;
-	// Columnar: dictIdx(2) + deltaLine(2) + col(2) + deltaRange(4) + len(2) = 12 bytes/token
-	const columnsPayloadLen = tokenCount * (2 + 2 + 2 + 4 + 2);
+	const dictCount = dictionary.length;
+	const dictEntries: Buffer[] = new Array(dictCount);
+	for (let i = 0; i < dictCount; i++) {
+		const hex = dictionary[i]!;
+		dictEntries[i] = Buffer.from(hex, "hex");
+	}
+	const dictBuf = Buffer.concat(dictEntries);
 
-	const headerLen =
-		4 + // magic 'DUP3'
-		2 + // version (3)
-		2 +
-		formatBuf.length +
-		2 +
-		hashBuf.length +
-		4 + // size
-		4 + // lines
-		4 + // tokenCount
-		8 + // updatedAt
-		2 + // minTokens
-		2 +
-		srcIdBuf.length +
-		2 + // dictCount
-		4; // tokenCount in payload
-
-	const buf = Buffer.allocUnsafe(
-		headerLen + dictPayloadLen + columnsPayloadLen,
-	);
-
-	let pos = 0;
-	buf.write("DUP3", pos, 4, "ascii");
-	pos += 4;
-	buf.writeUInt16LE(3, pos);
-	pos += 2;
-
-	buf.writeUInt16LE(formatBuf.length, pos);
-	pos += 2;
-	formatBuf.copy(buf, pos);
-	pos += formatBuf.length;
-
-	buf.writeUInt16LE(hashBuf.length, pos);
-	pos += 2;
-	hashBuf.copy(buf, pos);
-	pos += hashBuf.length;
-
-	buf.writeUInt32LE(shard.size, pos);
-	pos += 4;
-	buf.writeUInt32LE(shard.lines, pos);
-	pos += 4;
-	buf.writeUInt32LE(shard.tokenCount, pos);
-	pos += 4;
-	buf.writeDoubleLE(shard.updatedAt ?? Date.now(), pos);
-	pos += 8;
-
-	buf.writeUInt16LE(minTokens, pos);
-	pos += 2;
-
-	buf.writeUInt16LE(srcIdBuf.length, pos);
-	pos += 2;
-	srcIdBuf.copy(buf, pos);
-	pos += srcIdBuf.length;
-
-	buf.writeUInt16LE(dictCount, pos);
-	pos += 2;
-	buf.writeUInt32LE(tokenCount, pos);
-	pos += 4;
-
-	// Write dictionary table
-	for (const h of dict.keys()) {
-		const hexHash = h.length === 20 ? h : h.padEnd(20, "0");
-		buf.write(hexHash, pos, 10, "hex");
-		pos += 10;
+	const indicesBuf = Buffer.allocUnsafe(tokenCount * 2);
+	for (let i = 0; i < tokenCount; i++) {
+		const idx = dictMap.get(tokens[i]!.hash)!;
+		indicesBuf.writeUInt16LE(idx, i * 2);
 	}
 
-	// Columnar byte streams:
-	const dictIdxOffset = pos;
-	const deltaLineOffset = dictIdxOffset + tokenCount * 2;
-	const colOffset = deltaLineOffset + tokenCount * 2;
-	const deltaRangeOffset = colOffset + tokenCount * 2;
-	const lenOffset = deltaRangeOffset + tokenCount * 4;
+	const colBytes = tokenCount * 4;
+	const dLinesBuf = Buffer.allocUnsafe(colBytes);
+	const dColsBuf = Buffer.allocUnsafe(colBytes);
+	const dPosBuf = Buffer.allocUnsafe(colBytes);
+	const dLenBuf = Buffer.allocUnsafe(colBytes);
 
-	let prevLine = 1;
-	let prevRangeStart = 0;
+	let prevLine = 0;
+	let prevCol = 0;
+	let prevPos = 0;
 
 	for (let i = 0; i < tokenCount; i++) {
-		const t = tokens[i]!;
-		const curLine = t.line;
-		const curCol = t.column;
-		const curRange0 = t.range[0];
-		const curRange1 = t.range[1];
-		const tokLen = Math.max(0, curRange1 - curRange0);
+		const tok = tokens[i]!;
+		const dLine = tok.line - prevLine;
+		const dCol = tok.column - prevCol;
+		const dPos = tok.position - prevPos;
+		const len =
+			Array.isArray(tok.range) && tok.range.length >= 2
+				? tok.range[1] - tok.range[0]
+				: 0;
 
-		buf.writeUInt16LE(tokenIndices[i]!, dictIdxOffset + i * 2);
-		buf.writeUInt16LE(
-			Math.min(65535, Math.max(0, curLine - prevLine)),
-			deltaLineOffset + i * 2,
-		);
-		buf.writeUInt16LE(Math.min(65535, Math.max(0, curCol)), colOffset + i * 2);
-		buf.writeUInt32LE(
-			Math.max(0, curRange0 - prevRangeStart),
-			deltaRangeOffset + i * 4,
-		);
-		buf.writeUInt16LE(Math.min(65535, tokLen), lenOffset + i * 2);
+		dLinesBuf.writeInt32LE(dLine, i * 4);
+		dColsBuf.writeInt32LE(dCol, i * 4);
+		dPosBuf.writeInt32LE(dPos, i * 4);
+		dLenBuf.writeUInt32LE(len, i * 4);
 
-		prevLine = curLine;
-		prevRangeStart = curRange0;
+		prevLine = tok.line;
+		prevCol = tok.column;
+		prevPos = tok.position;
 	}
 
-	pos = lenOffset + tokenCount * 2;
-	return zlib.deflateRawSync(buf.subarray(0, pos));
+	const meta = {
+		sourceId: shard.sourceId,
+		contentHash: shard.contentHash,
+		format: shard.format,
+		size: shard.size,
+		lines: shard.lines,
+		tokenCount: shard.tokenCount,
+		minTokens: shard.minTokens,
+		updatedAt: shard.updatedAt ?? Date.now(),
+	};
+	const metaJson = Buffer.from(JSON.stringify(meta), "utf-8");
+
+	const HEADER_SIZE = 16;
+	const header = Buffer.allocUnsafe(HEADER_SIZE);
+	header.write(CACHE_FORMAT_MAGIC, 0, 4, "ascii");
+	header.writeUInt16LE(CACHE_FORMAT_VERSION, 4);
+	header.writeUInt16LE(metaJson.length, 6);
+	header.writeUInt32LE(tokenCount, 8);
+	header.writeUInt32LE(dictCount, 12);
+
+	const rawUncompressed = Buffer.concat([
+		header,
+		metaJson,
+		dictBuf,
+		indicesBuf,
+		dLinesBuf,
+		dColsBuf,
+		dPosBuf,
+		dLenBuf,
+	]);
+
+	return zlib.deflateSync(rawUncompressed, { level: 6 });
 }
 
 /**
@@ -279,121 +251,126 @@ export function unpackBinaryShard(
 	compressed: Buffer,
 ): SerializedSourceShard | null {
 	try {
-		const buf = zlib.inflateRawSync(compressed);
-		if (buf.length < 6) return null;
-		const magic = buf.toString("ascii", 0, 4);
-		if (magic !== CACHE_FORMAT_MAGIC) {
-			return null;
+		const raw = zlib.inflateSync(compressed);
+		if (raw.length < 16) return null;
+
+		const magic = raw.toString("ascii", 0, 4);
+		if (magic === CACHE_FORMAT_MAGIC) {
+			return unpackBinaryShardV3(raw);
 		}
-		return unpackBinaryShardV3(buf);
+		return null;
 	} catch {
 		return null;
 	}
 }
 
 function unpackBinaryShardV3(buf: Buffer): SerializedSourceShard | null {
-	let pos = 4;
-	const version = buf.readUInt16LE(pos);
-	pos += 2;
-	if (version !== 3) return null;
+	try {
+		const version = buf.readUInt16LE(4);
+		if (version < 3 || version > CACHE_FORMAT_VERSION) return null;
 
-	const formatLen = buf.readUInt16LE(pos);
-	pos += 2;
-	const format = buf.toString("utf8", pos, pos + formatLen);
-	pos += formatLen;
+		const metaLen = buf.readUInt16LE(6);
+		const tokenCount = buf.readUInt32LE(8);
+		const dictCount = buf.readUInt32LE(12);
 
-	const hashLen = buf.readUInt16LE(pos);
-	pos += 2;
-	const contentHash = buf.toString("utf8", pos, pos + hashLen);
-	pos += hashLen;
+		let offset = 16;
+		const metaJsonBuf = buf.subarray(offset, offset + metaLen);
+		offset += metaLen;
 
-	const size = buf.readUInt32LE(pos);
-	pos += 4;
-	const lines = buf.readUInt32LE(pos);
-	pos += 4;
-	const tokenCount = buf.readUInt32LE(pos);
-	pos += 4;
-	const updatedAt = buf.readDoubleLE(pos);
-	pos += 8;
+		const meta = JSON.parse(metaJsonBuf.toString("utf-8"));
+		const TOKEN_HASH_RAW_BYTES = 10;
+		const dictByteLen = dictCount * TOKEN_HASH_RAW_BYTES;
+		if (buf.length < offset + dictByteLen) return null;
 
-	const minTokens = buf.readUInt16LE(pos);
-	pos += 2;
+		const dictionary: string[] = new Array(dictCount);
+		for (let i = 0; i < dictCount; i++) {
+			dictionary[i] = buf
+				.subarray(offset + i * 10, offset + (i + 1) * 10)
+				.toString("hex");
+		}
+		offset += dictByteLen;
 
-	const srcLen = buf.readUInt16LE(pos);
-	pos += 2;
-	const sourceId = buf.toString("utf8", pos, pos + srcLen);
-	pos += srcLen;
+		const indicesByteLen = tokenCount * 2;
+		if (buf.length < offset + indicesByteLen) return null;
+		const indices = new Uint16Array(tokenCount);
+		for (let i = 0; i < tokenCount; i++) {
+			indices[i] = buf.readUInt16LE(offset + i * 2);
+		}
+		offset += indicesByteLen;
 
-	const dictCount = buf.readUInt16LE(pos);
-	pos += 2;
-	const tokensPayloadCount = buf.readUInt32LE(pos);
-	pos += 4;
+		const colBytes = tokenCount * 4;
+		if (buf.length < offset + colBytes * 4) return null;
 
-	// Read dictionary table
-	const dict = new Array<string>(dictCount);
-	for (let i = 0; i < dictCount; i++) {
-		dict[i] = buf.toString("hex", pos, pos + 10);
-		pos += 10;
-	}
+		const dLines = new Int32Array(tokenCount);
+		const dCols = new Int32Array(tokenCount);
+		const dPos = new Int32Array(tokenCount);
+		const dLens = new Uint32Array(tokenCount);
 
-	const dictIdxOffset = pos;
-	const deltaLineOffset = dictIdxOffset + tokensPayloadCount * 2;
-	const colOffset = deltaLineOffset + tokensPayloadCount * 2;
-	const deltaRangeOffset = colOffset + tokensPayloadCount * 2;
-	const lenOffset = deltaRangeOffset + tokensPayloadCount * 4;
+		for (let i = 0; i < tokenCount; i++) {
+			dLines[i] = buf.readInt32LE(offset + i * 4);
+		}
+		offset += colBytes;
 
-	const tokens: SerializedToken[] = new Array(tokensPayloadCount);
-	let prevLine = 1;
-	let prevRangeStart = 0;
+		for (let i = 0; i < tokenCount; i++) {
+			dCols[i] = buf.readInt32LE(offset + i * 4);
+		}
+		offset += colBytes;
 
-	for (let i = 0; i < tokensPayloadCount; i++) {
-		const dictIdx = buf.readUInt16LE(dictIdxOffset + i * 2);
-		const hash = dict[dictIdx] || "";
-		const deltaLine = buf.readUInt16LE(deltaLineOffset + i * 2);
-		const col = buf.readUInt16LE(colOffset + i * 2);
-		const deltaRange = buf.readUInt32LE(deltaRangeOffset + i * 4);
-		const tokLen = buf.readUInt16LE(lenOffset + i * 2);
+		for (let i = 0; i < tokenCount; i++) {
+			dPos[i] = buf.readInt32LE(offset + i * 4);
+		}
+		offset += colBytes;
 
-		const line = prevLine + deltaLine;
-		const rangeStart = prevRangeStart + deltaRange;
-		const rangeEnd = rangeStart + tokLen;
+		for (let i = 0; i < tokenCount; i++) {
+			dLens[i] = buf.readUInt32LE(offset + i * 4);
+		}
+		offset += colBytes;
 
-		tokens[i] = {
-			hash,
-			line,
-			column: col,
-			position: i,
-			range: [rangeStart, rangeEnd],
+		const tokens: SerializedToken[] = new Array(tokenCount);
+		let curLine = 0;
+		let curCol = 0;
+		let curPos = 0;
+
+		for (let i = 0; i < tokenCount; i++) {
+			curLine += dLines[i]!;
+			curCol += dCols[i]!;
+			curPos += dPos[i]!;
+			const len = dLens[i]!;
+			const dictIdx = indices[i]!;
+			const hash = dictionary[dictIdx] ?? "";
+
+			tokens[i] = {
+				hash,
+				line: curLine,
+				column: curCol,
+				position: curPos,
+				range: [curPos, curPos + len],
+			};
+		}
+
+		const minTokens = meta.minTokens ?? 40;
+		const frames: SourceFrame[] = reconstructFramesFromTokens(
+			tokens,
+			meta.sourceId,
+			minTokens,
+		);
+
+		return {
+			version,
+			sourceId: meta.sourceId,
+			contentHash: meta.contentHash,
+			format: meta.format,
+			size: meta.size,
+			lines: meta.lines,
+			tokenCount,
+			minTokens,
+			updatedAt: meta.updatedAt,
+			tokens,
+			frames,
 		};
-
-		prevLine = line;
-		prevRangeStart = rangeStart;
+	} catch {
+		return null;
 	}
-
-	let memoizedFrames: SourceFrame[] | null = null;
-
-	return {
-		version: 1,
-		sourceId,
-		contentHash,
-		format,
-		size,
-		lines,
-		tokenCount,
-		minTokens,
-		updatedAt,
-		tokens,
-		get frames(): SourceFrame[] {
-			if (!memoizedFrames) {
-				memoizedFrames = reconstructFramesFromTokens(
-					tokens,
-					sourceId,
-					minTokens || 40,
-				);
-			}
-			return memoizedFrames;
-		},
-	};
 }
 
 /**
@@ -401,6 +378,7 @@ function unpackBinaryShardV3(buf: Buffer): SerializedSourceShard | null {
  */
 export class DiskCacheManager {
 	readonly rootDir: string;
+	readonly repositoryKey: string;
 	readonly baseCacheDir: string;
 	readonly dbPath: string;
 	readonly workspaceCacheDir: string;
@@ -410,7 +388,6 @@ export class DiskCacheManager {
 	#db: Database | null = null;
 	#getStmt: Statement | null = null;
 	#saveStmt: Statement | null = null;
-	#updateMtimeStmt: Statement | null = null;
 	#deleteStmt: Statement | null = null;
 	#totalSizeStmt: Statement | null = null;
 	#oldestShardsStmt: Statement | null = null;
@@ -419,13 +396,20 @@ export class DiskCacheManager {
 
 	constructor(options: DiskCacheOptions) {
 		this.rootDir = path.resolve(options.rootDir);
+		this.repositoryKey =
+			options.repositoryKey ??
+			crypto
+				.createHash("sha256")
+				.update(this.rootDir)
+				.digest("hex")
+				.slice(0, 16);
 		this.baseCacheDir = options.cacheDir
 			? path.resolve(options.cacheDir)
 			: getDefaultCacheDir();
 		this.configFingerprint = computeConfigFingerprint(options.config);
 		this.dbPath = computeWorkspaceCachePath(
 			this.baseCacheDir,
-			this.rootDir,
+			this.repositoryKey,
 			this.configFingerprint,
 		);
 		this.workspaceCacheDir = this.baseCacheDir;
@@ -436,64 +420,75 @@ export class DiskCacheManager {
 		if (this.#closed) return null;
 		if (this.#db) return this.#db;
 
+		let db: Database | null = null;
 		try {
 			const dir = path.dirname(this.dbPath);
 			if (!fsSync.existsSync(dir)) {
 				fsSync.mkdirSync(dir, { recursive: true });
 			}
 
-			const db = new Database(this.dbPath, { create: true });
-			db.exec("PRAGMA journal_mode = WAL;");
+			db = new Database(this.dbPath, { create: true });
+			db.exec("PRAGMA busy_timeout = 2000;");
+			const journalRow = db.query("PRAGMA journal_mode = WAL;").get() as
+				| { journal_mode?: string }
+				| undefined;
+			if (journalRow?.journal_mode?.toLowerCase() !== "wal") {
+				try {
+					db.close();
+				} catch {}
+				return null;
+			}
 			db.exec("PRAGMA synchronous = NORMAL;");
 			db.exec("PRAGMA temp_store = MEMORY;");
-
-			// Clear cache and reset schema on version difference
 			const versionRow = db.query("PRAGMA user_version;").get() as
 				| { user_version: number }
 				| undefined;
 			const schemaVersion = versionRow?.user_version ?? 0;
 			if (schemaVersion !== CACHE_FORMAT_VERSION) {
-				db.exec("DROP TABLE IF EXISTS shards;");
+				try {
+					db.exec("DELETE FROM shards;");
+				} catch {}
 				db.exec(`PRAGMA user_version = ${CACHE_FORMAT_VERSION};`);
 			}
 
 			db.exec(`
 				CREATE TABLE IF NOT EXISTS shards (
-					rel_path TEXT NOT NULL PRIMARY KEY,
+					rel_path TEXT NOT NULL,
 					content_hash TEXT NOT NULL,
 					payload BLOB NOT NULL,
-					mtime REAL NOT NULL
+					mtime REAL NOT NULL,
+					PRIMARY KEY (rel_path, content_hash)
 				);
-				CREATE INDEX IF NOT EXISTS idx_shards_content_hash ON shards(content_hash);
 				CREATE INDEX IF NOT EXISTS idx_shards_mtime ON shards(mtime);
 			`);
-
 			this.#getStmt = db.prepare(
-				"SELECT payload, content_hash FROM shards WHERE rel_path = ?1",
+				"SELECT payload FROM shards WHERE rel_path = ?1 AND content_hash = ?2",
 			);
 			this.#saveStmt = db.prepare(`
 				INSERT INTO shards (rel_path, content_hash, payload, mtime)
 				VALUES (?1, ?2, ?3, ?4)
-				ON CONFLICT(rel_path) DO UPDATE SET
-					content_hash = excluded.content_hash,
-					payload = excluded.payload,
+				ON CONFLICT(rel_path, content_hash) DO UPDATE SET
 					mtime = excluded.mtime
 			`);
-			this.#updateMtimeStmt = db.prepare(
-				"UPDATE shards SET mtime = ?1 WHERE rel_path = ?2",
+			this.#deleteStmt = db.prepare(
+				"DELETE FROM shards WHERE rel_path = ?1 AND content_hash = ?2",
 			);
-			this.#deleteStmt = db.prepare("DELETE FROM shards WHERE rel_path = ?1");
 			this.#totalSizeStmt = db.prepare(
 				"SELECT COALESCE(SUM(LENGTH(payload)), 0) as total FROM shards",
 			);
 			this.#oldestShardsStmt = db.prepare(
-				"SELECT rel_path, LENGTH(payload) as size FROM shards ORDER BY mtime ASC",
+				"SELECT rowid, LENGTH(payload) as size FROM shards ORDER BY mtime ASC LIMIT ?1",
 			);
 			this.#deleteAllStmt = db.prepare("DELETE FROM shards");
 
 			this.#db = db;
 			return db;
 		} catch {
+			if (db) {
+				try {
+					db.close();
+				} catch {}
+			}
 			// Fail open on SQLite creation or permission errors
 			return null;
 		}
@@ -501,6 +496,7 @@ export class DiskCacheManager {
 
 	/**
 	 * Retrieves a serialized shard from the SQLite cache if present and valid.
+	 * Pure read-only operation: does not issue write transactions on cache hits.
 	 * Returns null on cache miss or corrupted/invalid shard (fails open).
 	 */
 	async getShard(
@@ -512,15 +508,14 @@ export class DiskCacheManager {
 			if (!db || !this.#getStmt) return null;
 
 			const normalizedRelPath = relPath.replace(/\\/g, "/");
-			const row = this.#getStmt.get(normalizedRelPath) as
+			const row = this.#getStmt.get(normalizedRelPath, contentHash) as
 				| {
 						payload: Uint8Array | Buffer;
-						content_hash: string;
 				  }
 				| null
 				| undefined;
 
-			if (!row || row.content_hash !== contentHash) {
+			if (!row) {
 				return null;
 			}
 
@@ -536,22 +531,9 @@ export class DiskCacheManager {
 			if (
 				shard &&
 				shard.contentHash === contentHash &&
-				typeof shard.sourceId === "string" &&
 				Array.isArray(shard.frames)
 			) {
-				try {
-					this.#updateMtimeStmt?.run(Date.now(), normalizedRelPath);
-				} catch {
-					// Non-fatal
-				}
 				return shard;
-			}
-
-			// If shard was corrupted or outdated version, clean up the invalid row
-			try {
-				this.#deleteStmt?.run(normalizedRelPath);
-			} catch {
-				// Non-fatal
 			}
 
 			return null;
@@ -592,9 +574,71 @@ export class DiskCacheManager {
 			// Fail open: cache write failures should not disrupt indexing
 		}
 	}
+	/**
+	 * Deletes a cached shard by relPath and contentHash if present.
+	 */
+	async deleteShard(relPath: string, contentHash: string): Promise<void> {
+		try {
+			const db = this.#getDb();
+			if (!db || !this.#deleteStmt) return;
+			const normalizedRelPath = relPath.replace(/\\/g, "/");
+			this.#deleteStmt.run(normalizedRelPath, contentHash);
+		} catch {
+			// Fail open
+		}
+	}
 
 	/**
-	 * Prunes the oldest shards in the SQLite cache if total payload size exceeds budget.
+	 * Atomically saves a batch of pre-tokenized shards inside a single SQLite transaction.
+	 */
+	async saveShards(
+		items: Array<{ shard: SerializedSourceShard; relPath?: string }>,
+	): Promise<void> {
+		if (items.length === 0) return;
+		try {
+			const db = this.#getDb();
+			if (!db || !this.#saveStmt) return;
+
+			const stmt = this.#saveStmt;
+			const root = this.rootDir;
+			const now = Date.now();
+
+			// Pre-pack payloads outside transaction to minimize write lock time
+			const prepared: Array<{
+				relPath: string;
+				hash: string;
+				payload: Buffer;
+			}> = [];
+			for (const item of items) {
+				const targetRelPath =
+					item.relPath ??
+					(path.isAbsolute(item.shard.sourceId)
+						? path.relative(root, item.shard.sourceId)
+						: item.shard.sourceId);
+				const normalizedRelPath = targetRelPath.replace(/\\/g, "/");
+				const payload = packBinaryShard(item.shard);
+				prepared.push({
+					relPath: normalizedRelPath,
+					hash: item.shard.contentHash,
+					payload,
+				});
+			}
+
+			const tx = db.transaction((entries: typeof prepared) => {
+				for (const entry of entries) {
+					stmt.run(entry.relPath, entry.hash, entry.payload, now);
+				}
+			});
+
+			tx(prepared);
+		} catch {
+			// Fail open
+		}
+	}
+
+	/**
+	 * Prunes oldest shards if total payload size exceeds budget using atomic windowed DELETE.
+	 * Avoids concurrent VACUUM calls during active sessions.
 	 */
 	async prune(maxBytes?: number): Promise<void> {
 		const budget = maxBytes !== undefined ? maxBytes : this.maxBytes;
@@ -605,48 +649,44 @@ export class DiskCacheManager {
 
 			if (budget <= 0) {
 				this.#deleteAllStmt?.run();
-				try {
-					db.exec("VACUUM;");
-				} catch {
-					// Ignore vacuum errors
-				}
 				return;
 			}
 
-			const totalRow = this.#totalSizeStmt?.get() as
-				| { total: number }
-				| null
-				| undefined;
-			let totalSize = totalRow?.total ?? 0;
+			// Iteratively prune oldest shards in bounded windows
+			for (let iter = 0; iter < 10; iter++) {
+				const totalRow = this.#totalSizeStmt?.get() as
+					| { total: number }
+					| null
+					| undefined;
+				const totalSize = totalRow?.total ?? 0;
 
-			if (totalSize <= budget) {
-				return;
-			}
-
-			const oldestShards = (this.#oldestShardsStmt?.all() ?? []) as Array<{
-				rel_path: string;
-				size: number;
-			}>;
-
-			let deletedAny = false;
-			for (const entry of oldestShards) {
 				if (totalSize <= budget) {
 					break;
 				}
-				try {
-					this.#deleteStmt?.run(entry.rel_path);
-					totalSize -= entry.size;
-					deletedAny = true;
-				} catch {
-					// Ignore individual deletion errors
-				}
-			}
 
-			if (deletedAny) {
-				try {
-					db.exec("VACUUM;");
-				} catch {
-					// Ignore vacuum errors
+				const excess = totalSize - budget;
+				const rows = (this.#oldestShardsStmt?.all(100) ?? []) as Array<{
+					rowid: number;
+					size: number;
+				}>;
+
+				if (rows.length === 0) break;
+
+				const rowidsToDelete: number[] = [];
+				let freed = 0;
+				for (const r of rows) {
+					rowidsToDelete.push(r.rowid);
+					freed += r.size;
+					if (freed >= excess) break;
+				}
+
+				if (rowidsToDelete.length > 0) {
+					const deleteBatchStmt = db.prepare(
+						`DELETE FROM shards WHERE rowid IN (${rowidsToDelete.join(",")})`,
+					);
+					deleteBatchStmt.run();
+				} else {
+					break;
 				}
 			}
 		} catch {
@@ -655,27 +695,14 @@ export class DiskCacheManager {
 	}
 
 	/**
-	 * Clears all cached shards in the current workspace cache database.
+	 * Clears all cached shards in the current workspace cache database non-destructively.
 	 */
 	async clear(): Promise<void> {
 		try {
-			if (this.#db) {
-				try {
-					this.#db.close();
-				} catch {}
-				this.#db = null;
-				this.#getStmt = null;
-				this.#saveStmt = null;
-				this.#updateMtimeStmt = null;
-				this.#deleteStmt = null;
-				this.#totalSizeStmt = null;
-				this.#oldestShardsStmt = null;
-				this.#deleteAllStmt = null;
+			const db = this.#getDb();
+			if (db && this.#deleteAllStmt) {
+				this.#deleteAllStmt.run();
 			}
-
-			await fs.unlink(this.dbPath).catch(() => {});
-			await fs.unlink(`${this.dbPath}-wal`).catch(() => {});
-			await fs.unlink(`${this.dbPath}-shm`).catch(() => {});
 		} catch {
 			// Fail open
 		}
@@ -693,11 +720,35 @@ export class DiskCacheManager {
 			this.#db = null;
 			this.#getStmt = null;
 			this.#saveStmt = null;
-			this.#updateMtimeStmt = null;
 			this.#deleteStmt = null;
 			this.#totalSizeStmt = null;
 			this.#oldestShardsStmt = null;
 			this.#deleteAllStmt = null;
 		}
+	}
+}
+
+/**
+ * Removes legacy pre-v4 cache files from the cache directory.
+ */
+export async function cleanupLegacyCacheFiles(
+	customCacheDir?: string,
+): Promise<void> {
+	const baseDir = customCacheDir ?? getDefaultCacheDir();
+	try {
+		if (!fsSync.existsSync(baseDir)) return;
+		const entries = await fs.readdir(baseDir);
+		for (const entry of entries) {
+			if (
+				entry.endsWith(".sqlite") &&
+				!entry.includes(`_v${CACHE_FORMAT_VERSION}.sqlite`)
+			) {
+				await fs.unlink(path.join(baseDir, entry)).catch(() => {});
+				await fs.unlink(path.join(baseDir, `${entry}-wal`)).catch(() => {});
+				await fs.unlink(path.join(baseDir, `${entry}-shm`)).catch(() => {});
+			}
+		}
+	} catch {
+		// Fail open
 	}
 }

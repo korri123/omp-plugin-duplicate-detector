@@ -408,7 +408,7 @@ export function formatCurrency(amount: number, currency = "USD"): string {
 			// Inject corrupted binary payload directly into the shards table
 			const db = new Database(cacheManager.dbPath);
 			db.prepare(
-				"INSERT INTO shards (rel_path, content_hash, payload, mtime) VALUES (?1, ?2, ?3, ?4) ON CONFLICT(rel_path) DO UPDATE SET payload = excluded.payload",
+				"INSERT INTO shards (rel_path, content_hash, payload, mtime) VALUES (?1, ?2, ?3, ?4) ON CONFLICT(rel_path, content_hash) DO UPDATE SET payload = excluded.payload",
 			).run(
 				"src/corrupt.ts",
 				"abc123456",
@@ -549,13 +549,8 @@ export function formatCurrency(amount: number, currency = "USD"): string {
 			await cacheManager.saveShard(shard, relPath);
 
 			await cacheManager.clear();
-
-			const exists = await fs
-				.stat(cacheManager.dbPath)
-				.then(() => true)
-				.catch(() => false);
-			expect(exists).toBe(false);
-
+			const afterClear = await cacheManager.getShard(relPath, contentHash);
+			expect(afterClear).toBeNull();
 			cacheManager.close();
 		});
 	});
@@ -582,7 +577,7 @@ export function formatCurrency(amount: number, currency = "USD"): string {
 			const retrieved = await cacheManager.getShard(relPath, hash);
 
 			expect(retrieved).not.toBeNull();
-			expect(retrieved?.version).toBe(1);
+			expect(retrieved?.version).toBe(CACHE_FORMAT_VERSION);
 			expect(retrieved?.sourceId).toBe(fullPath);
 			expect(retrieved?.contentHash).toBe(hash);
 			const retFrames = retrieved?.frames ?? [];
@@ -599,10 +594,11 @@ export function formatCurrency(amount: number, currency = "USD"): string {
 			}
 		});
 		it("clears old shards and resets schema on SQLite cache version mismatch", async () => {
+			const cfgFingerprint = computeConfigFingerprint();
 			const dbPath = computeWorkspaceCachePath(
 				cacheBaseDir,
 				workspaceDir,
-				"default",
+				cfgFingerprint,
 			);
 			await fs.mkdir(path.dirname(dbPath), { recursive: true });
 

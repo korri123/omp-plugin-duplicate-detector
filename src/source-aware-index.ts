@@ -478,7 +478,20 @@ export class SourceAwareCloneIndex {
 		let normalizedFrames: CompactSourceFrame[];
 		const shardTokens = shard.tokens;
 
-		if (shard.frames && shard.frames.length > 0) {
+		if (
+			shardTokens &&
+			shardTokens.length > 0 &&
+			(shard.minTokens !== this.#minTokens ||
+				!shard.frames ||
+				shard.frames.length === 0)
+		) {
+			normalizedFrames = reconstructFramesFromTokens(
+				shardTokens,
+				sourceId,
+				this.#minTokens,
+				this.#hashFunction,
+			);
+		} else if (shard.frames && shard.frames.length > 0) {
 			normalizedFrames = shard.frames.map((f) => {
 				if (f instanceof CompactSourceFrame && f.sourceId === sourceId) {
 					return f;

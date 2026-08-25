@@ -970,9 +970,9 @@ var require_ignore = __commonJS(function(exports, module) {
 });
 
 // src/detector-worker.ts
-import * as crypto2 from "crypto";
-import * as fs2 from "fs/promises";
-import * as path4 from "path";
+import * as crypto3 from "crypto";
+import * as fs3 from "fs/promises";
+import * as path5 from "path";
 
 // src/disk-cache.ts
 import { Database } from "bun:sqlite";
@@ -12565,7 +12565,9 @@ class SourceAwareCloneIndex {
     }
     let normalizedFrames;
     const shardTokens = shard.tokens;
-    if (shard.frames && shard.frames.length > 0) {
+    if (shardTokens && shardTokens.length > 0 && (shard.minTokens !== this.#minTokens || !shard.frames || shard.frames.length === 0)) {
+      normalizedFrames = reconstructFramesFromTokens(shardTokens, sourceId, this.#minTokens, this.#hashFunction);
+    } else if (shard.frames && shard.frames.length > 0) {
       normalizedFrames = shard.frames.map((f) => {
         if (f instanceof CompactSourceFrame && f.sourceId === sourceId) {
           return f;
@@ -12835,6 +12837,7 @@ class SourceAwareCloneIndex {
 
 // src/disk-cache.ts
 var DEFAULT_MAX_CACHE_BYTES = 250 * 1024 * 1024;
+var TOKENIZER_CACHE_VERSION = "4.0";
 function getDefaultCacheDir() {
   if (process.platform === "win32") {
     const localAppData = process.env.LOCALAPPDATA;
@@ -12851,7 +12854,7 @@ function getDefaultCacheDir() {
 }
 function computeConfigFingerprint(config) {
   if (!config)
-    return "default";
+    return `default_${TOKENIZER_CACHE_VERSION}`;
   let sortedFormats;
   if (config.formatsExts) {
     sortedFormats = {};
@@ -12860,6 +12863,7 @@ function computeConfigFingerprint(config) {
     }
   }
   const canonical = {
+    version: TOKENIZER_CACHE_VERSION,
     minTokens: config.minTokens ?? 40,
     minLines: config.minLines ?? 5,
     maxLines: config.maxLines ?? 500,
@@ -12868,201 +12872,199 @@ function computeConfigFingerprint(config) {
   };
   return crypto.createHash("sha256").update(JSON.stringify(canonical)).digest("hex").slice(0, 16);
 }
-function computeWorkspaceCachePath(baseDir, rootDir, configFingerprint) {
-  const canonicalPath = path3.resolve(rootDir);
-  const workspaceHash = crypto.createHash("sha256").update(canonicalPath).digest("hex").slice(0, 16);
-  return path3.join(baseDir, `${workspaceHash}_${configFingerprint}.sqlite`);
+function computeWorkspaceCachePath(baseDir, repositoryKeyOrRootDir, configFingerprint) {
+  const isKey = /^[0-9a-f]{16}$/i.test(repositoryKeyOrRootDir);
+  const repoKey = isKey ? repositoryKeyOrRootDir : crypto.createHash("sha256").update(path3.resolve(repositoryKeyOrRootDir)).digest("hex").slice(0, 16);
+  return path3.join(baseDir, `${repoKey}_${configFingerprint}_v${CACHE_FORMAT_VERSION}.sqlite`);
 }
 var CACHE_FORMAT_MAGIC = "DUP3";
-var CACHE_FORMAT_VERSION = 3;
+var CACHE_FORMAT_VERSION = 4;
 function packBinaryShard(shard) {
   return packBinaryShardV3(shard, shard.tokens ?? []);
 }
 function packBinaryShardV3(shard, tokens) {
-  const srcIdBuf = Buffer.from(shard.sourceId, "utf8");
-  const formatBuf = Buffer.from(shard.format, "utf8");
-  const hashBuf = Buffer.from(shard.contentHash, "utf8");
   const tokenCount = tokens.length;
-  const minTokens = shard.minTokens ?? 40;
-  const dict = new Map;
-  const tokenIndices = new Uint16Array(tokenCount);
+  const dictionary = [];
+  const dictMap = new Map;
   for (let i = 0;i < tokenCount; i++) {
     const h = tokens[i].hash;
-    let idx = dict.get(h);
-    if (idx === undefined) {
-      idx = dict.size;
-      dict.set(h, idx);
+    if (!dictMap.has(h)) {
+      dictMap.set(h, dictionary.length);
+      dictionary.push(h);
     }
-    tokenIndices[i] = idx;
   }
-  const dictCount = dict.size;
-  const dictPayloadLen = dictCount * 10;
-  const columnsPayloadLen = tokenCount * (2 + 2 + 2 + 4 + 2);
-  const headerLen = 4 + 2 + 2 + formatBuf.length + 2 + hashBuf.length + 4 + 4 + 4 + 8 + 2 + 2 + srcIdBuf.length + 2 + 4;
-  const buf = Buffer.allocUnsafe(headerLen + dictPayloadLen + columnsPayloadLen);
-  let pos = 0;
-  buf.write("DUP3", pos, 4, "ascii");
-  pos += 4;
-  buf.writeUInt16LE(3, pos);
-  pos += 2;
-  buf.writeUInt16LE(formatBuf.length, pos);
-  pos += 2;
-  formatBuf.copy(buf, pos);
-  pos += formatBuf.length;
-  buf.writeUInt16LE(hashBuf.length, pos);
-  pos += 2;
-  hashBuf.copy(buf, pos);
-  pos += hashBuf.length;
-  buf.writeUInt32LE(shard.size, pos);
-  pos += 4;
-  buf.writeUInt32LE(shard.lines, pos);
-  pos += 4;
-  buf.writeUInt32LE(shard.tokenCount, pos);
-  pos += 4;
-  buf.writeDoubleLE(shard.updatedAt ?? Date.now(), pos);
-  pos += 8;
-  buf.writeUInt16LE(minTokens, pos);
-  pos += 2;
-  buf.writeUInt16LE(srcIdBuf.length, pos);
-  pos += 2;
-  srcIdBuf.copy(buf, pos);
-  pos += srcIdBuf.length;
-  buf.writeUInt16LE(dictCount, pos);
-  pos += 2;
-  buf.writeUInt32LE(tokenCount, pos);
-  pos += 4;
-  for (const h of dict.keys()) {
-    const hexHash = h.length === 20 ? h : h.padEnd(20, "0");
-    buf.write(hexHash, pos, 10, "hex");
-    pos += 10;
+  const dictCount = dictionary.length;
+  const dictEntries = new Array(dictCount);
+  for (let i = 0;i < dictCount; i++) {
+    const hex = dictionary[i];
+    dictEntries[i] = Buffer.from(hex, "hex");
   }
-  const dictIdxOffset = pos;
-  const deltaLineOffset = dictIdxOffset + tokenCount * 2;
-  const colOffset = deltaLineOffset + tokenCount * 2;
-  const deltaRangeOffset = colOffset + tokenCount * 2;
-  const lenOffset = deltaRangeOffset + tokenCount * 4;
-  let prevLine = 1;
-  let prevRangeStart = 0;
+  const dictBuf = Buffer.concat(dictEntries);
+  const indicesBuf = Buffer.allocUnsafe(tokenCount * 2);
   for (let i = 0;i < tokenCount; i++) {
-    const t = tokens[i];
-    const curLine = t.line;
-    const curCol = t.column;
-    const curRange0 = t.range[0];
-    const curRange1 = t.range[1];
-    const tokLen = Math.max(0, curRange1 - curRange0);
-    buf.writeUInt16LE(tokenIndices[i], dictIdxOffset + i * 2);
-    buf.writeUInt16LE(Math.min(65535, Math.max(0, curLine - prevLine)), deltaLineOffset + i * 2);
-    buf.writeUInt16LE(Math.min(65535, Math.max(0, curCol)), colOffset + i * 2);
-    buf.writeUInt32LE(Math.max(0, curRange0 - prevRangeStart), deltaRangeOffset + i * 4);
-    buf.writeUInt16LE(Math.min(65535, tokLen), lenOffset + i * 2);
-    prevLine = curLine;
-    prevRangeStart = curRange0;
+    const idx = dictMap.get(tokens[i].hash);
+    indicesBuf.writeUInt16LE(idx, i * 2);
   }
-  pos = lenOffset + tokenCount * 2;
-  return zlib.deflateRawSync(buf.subarray(0, pos));
+  const colBytes = tokenCount * 4;
+  const dLinesBuf = Buffer.allocUnsafe(colBytes);
+  const dColsBuf = Buffer.allocUnsafe(colBytes);
+  const dPosBuf = Buffer.allocUnsafe(colBytes);
+  const dLenBuf = Buffer.allocUnsafe(colBytes);
+  let prevLine = 0;
+  let prevCol = 0;
+  let prevPos = 0;
+  for (let i = 0;i < tokenCount; i++) {
+    const tok = tokens[i];
+    const dLine = tok.line - prevLine;
+    const dCol = tok.column - prevCol;
+    const dPos = tok.position - prevPos;
+    const len = Array.isArray(tok.range) && tok.range.length >= 2 ? tok.range[1] - tok.range[0] : 0;
+    dLinesBuf.writeInt32LE(dLine, i * 4);
+    dColsBuf.writeInt32LE(dCol, i * 4);
+    dPosBuf.writeInt32LE(dPos, i * 4);
+    dLenBuf.writeUInt32LE(len, i * 4);
+    prevLine = tok.line;
+    prevCol = tok.column;
+    prevPos = tok.position;
+  }
+  const meta = {
+    sourceId: shard.sourceId,
+    contentHash: shard.contentHash,
+    format: shard.format,
+    size: shard.size,
+    lines: shard.lines,
+    tokenCount: shard.tokenCount,
+    minTokens: shard.minTokens,
+    updatedAt: shard.updatedAt ?? Date.now()
+  };
+  const metaJson = Buffer.from(JSON.stringify(meta), "utf-8");
+  const HEADER_SIZE = 16;
+  const header = Buffer.allocUnsafe(HEADER_SIZE);
+  header.write(CACHE_FORMAT_MAGIC, 0, 4, "ascii");
+  header.writeUInt16LE(CACHE_FORMAT_VERSION, 4);
+  header.writeUInt16LE(metaJson.length, 6);
+  header.writeUInt32LE(tokenCount, 8);
+  header.writeUInt32LE(dictCount, 12);
+  const rawUncompressed = Buffer.concat([
+    header,
+    metaJson,
+    dictBuf,
+    indicesBuf,
+    dLinesBuf,
+    dColsBuf,
+    dPosBuf,
+    dLenBuf
+  ]);
+  return zlib.deflateSync(rawUncompressed, { level: 6 });
 }
 function unpackBinaryShard(compressed) {
   try {
-    const buf = zlib.inflateRawSync(compressed);
-    if (buf.length < 6)
+    const raw = zlib.inflateSync(compressed);
+    if (raw.length < 16)
       return null;
-    const magic = buf.toString("ascii", 0, 4);
-    if (magic !== CACHE_FORMAT_MAGIC) {
-      return null;
+    const magic = raw.toString("ascii", 0, 4);
+    if (magic === CACHE_FORMAT_MAGIC) {
+      return unpackBinaryShardV3(raw);
     }
-    return unpackBinaryShardV3(buf);
+    return null;
   } catch {
     return null;
   }
 }
 function unpackBinaryShardV3(buf) {
-  let pos = 4;
-  const version = buf.readUInt16LE(pos);
-  pos += 2;
-  if (version !== 3)
-    return null;
-  const formatLen = buf.readUInt16LE(pos);
-  pos += 2;
-  const format = buf.toString("utf8", pos, pos + formatLen);
-  pos += formatLen;
-  const hashLen = buf.readUInt16LE(pos);
-  pos += 2;
-  const contentHash = buf.toString("utf8", pos, pos + hashLen);
-  pos += hashLen;
-  const size = buf.readUInt32LE(pos);
-  pos += 4;
-  const lines = buf.readUInt32LE(pos);
-  pos += 4;
-  const tokenCount = buf.readUInt32LE(pos);
-  pos += 4;
-  const updatedAt = buf.readDoubleLE(pos);
-  pos += 8;
-  const minTokens = buf.readUInt16LE(pos);
-  pos += 2;
-  const srcLen = buf.readUInt16LE(pos);
-  pos += 2;
-  const sourceId = buf.toString("utf8", pos, pos + srcLen);
-  pos += srcLen;
-  const dictCount = buf.readUInt16LE(pos);
-  pos += 2;
-  const tokensPayloadCount = buf.readUInt32LE(pos);
-  pos += 4;
-  const dict = new Array(dictCount);
-  for (let i = 0;i < dictCount; i++) {
-    dict[i] = buf.toString("hex", pos, pos + 10);
-    pos += 10;
-  }
-  const dictIdxOffset = pos;
-  const deltaLineOffset = dictIdxOffset + tokensPayloadCount * 2;
-  const colOffset = deltaLineOffset + tokensPayloadCount * 2;
-  const deltaRangeOffset = colOffset + tokensPayloadCount * 2;
-  const lenOffset = deltaRangeOffset + tokensPayloadCount * 4;
-  const tokens = new Array(tokensPayloadCount);
-  let prevLine = 1;
-  let prevRangeStart = 0;
-  for (let i = 0;i < tokensPayloadCount; i++) {
-    const dictIdx = buf.readUInt16LE(dictIdxOffset + i * 2);
-    const hash2 = dict[dictIdx] || "";
-    const deltaLine = buf.readUInt16LE(deltaLineOffset + i * 2);
-    const col = buf.readUInt16LE(colOffset + i * 2);
-    const deltaRange = buf.readUInt32LE(deltaRangeOffset + i * 4);
-    const tokLen = buf.readUInt16LE(lenOffset + i * 2);
-    const line = prevLine + deltaLine;
-    const rangeStart = prevRangeStart + deltaRange;
-    const rangeEnd = rangeStart + tokLen;
-    tokens[i] = {
-      hash: hash2,
-      line,
-      column: col,
-      position: i,
-      range: [rangeStart, rangeEnd]
-    };
-    prevLine = line;
-    prevRangeStart = rangeStart;
-  }
-  let memoizedFrames = null;
-  return {
-    version: 1,
-    sourceId,
-    contentHash,
-    format,
-    size,
-    lines,
-    tokenCount,
-    minTokens,
-    updatedAt,
-    tokens,
-    get frames() {
-      if (!memoizedFrames) {
-        memoizedFrames = reconstructFramesFromTokens(tokens, sourceId, minTokens || 40);
-      }
-      return memoizedFrames;
+  try {
+    const version = buf.readUInt16LE(4);
+    if (version < 3 || version > CACHE_FORMAT_VERSION)
+      return null;
+    const metaLen = buf.readUInt16LE(6);
+    const tokenCount = buf.readUInt32LE(8);
+    const dictCount = buf.readUInt32LE(12);
+    let offset = 16;
+    const metaJsonBuf = buf.subarray(offset, offset + metaLen);
+    offset += metaLen;
+    const meta = JSON.parse(metaJsonBuf.toString("utf-8"));
+    const TOKEN_HASH_RAW_BYTES = 10;
+    const dictByteLen = dictCount * TOKEN_HASH_RAW_BYTES;
+    if (buf.length < offset + dictByteLen)
+      return null;
+    const dictionary = new Array(dictCount);
+    for (let i = 0;i < dictCount; i++) {
+      dictionary[i] = buf.subarray(offset + i * 10, offset + (i + 1) * 10).toString("hex");
     }
-  };
+    offset += dictByteLen;
+    const indicesByteLen = tokenCount * 2;
+    if (buf.length < offset + indicesByteLen)
+      return null;
+    const indices = new Uint16Array(tokenCount);
+    for (let i = 0;i < tokenCount; i++) {
+      indices[i] = buf.readUInt16LE(offset + i * 2);
+    }
+    offset += indicesByteLen;
+    const colBytes = tokenCount * 4;
+    if (buf.length < offset + colBytes * 4)
+      return null;
+    const dLines = new Int32Array(tokenCount);
+    const dCols = new Int32Array(tokenCount);
+    const dPos = new Int32Array(tokenCount);
+    const dLens = new Uint32Array(tokenCount);
+    for (let i = 0;i < tokenCount; i++) {
+      dLines[i] = buf.readInt32LE(offset + i * 4);
+    }
+    offset += colBytes;
+    for (let i = 0;i < tokenCount; i++) {
+      dCols[i] = buf.readInt32LE(offset + i * 4);
+    }
+    offset += colBytes;
+    for (let i = 0;i < tokenCount; i++) {
+      dPos[i] = buf.readInt32LE(offset + i * 4);
+    }
+    offset += colBytes;
+    for (let i = 0;i < tokenCount; i++) {
+      dLens[i] = buf.readUInt32LE(offset + i * 4);
+    }
+    offset += colBytes;
+    const tokens = new Array(tokenCount);
+    let curLine = 0;
+    let curCol = 0;
+    let curPos = 0;
+    for (let i = 0;i < tokenCount; i++) {
+      curLine += dLines[i];
+      curCol += dCols[i];
+      curPos += dPos[i];
+      const len = dLens[i];
+      const dictIdx = indices[i];
+      const hash2 = dictionary[dictIdx] ?? "";
+      tokens[i] = {
+        hash: hash2,
+        line: curLine,
+        column: curCol,
+        position: curPos,
+        range: [curPos, curPos + len]
+      };
+    }
+    const minTokens = meta.minTokens ?? 40;
+    const frames = reconstructFramesFromTokens(tokens, meta.sourceId, minTokens);
+    return {
+      version,
+      sourceId: meta.sourceId,
+      contentHash: meta.contentHash,
+      format: meta.format,
+      size: meta.size,
+      lines: meta.lines,
+      tokenCount,
+      minTokens,
+      updatedAt: meta.updatedAt,
+      tokens,
+      frames
+    };
+  } catch {
+    return null;
+  }
 }
 
 class DiskCacheManager {
   rootDir;
+  repositoryKey;
   baseCacheDir;
   dbPath;
   workspaceCacheDir;
@@ -13071,7 +13073,6 @@ class DiskCacheManager {
   #db = null;
   #getStmt = null;
   #saveStmt = null;
-  #updateMtimeStmt = null;
   #deleteStmt = null;
   #totalSizeStmt = null;
   #oldestShardsStmt = null;
@@ -13079,9 +13080,10 @@ class DiskCacheManager {
   #closed = false;
   constructor(options) {
     this.rootDir = path3.resolve(options.rootDir);
+    this.repositoryKey = options.repositoryKey ?? crypto.createHash("sha256").update(this.rootDir).digest("hex").slice(0, 16);
     this.baseCacheDir = options.cacheDir ? path3.resolve(options.cacheDir) : getDefaultCacheDir();
     this.configFingerprint = computeConfigFingerprint(options.config);
-    this.dbPath = computeWorkspaceCachePath(this.baseCacheDir, this.rootDir, this.configFingerprint);
+    this.dbPath = computeWorkspaceCachePath(this.baseCacheDir, this.repositoryKey, this.configFingerprint);
     this.workspaceCacheDir = this.baseCacheDir;
     this.maxBytes = options.maxBytes ?? DEFAULT_MAX_CACHE_BYTES;
   }
@@ -13090,48 +13092,60 @@ class DiskCacheManager {
       return null;
     if (this.#db)
       return this.#db;
+    let db = null;
     try {
       const dir = path3.dirname(this.dbPath);
       if (!fsSync.existsSync(dir)) {
         fsSync.mkdirSync(dir, { recursive: true });
       }
-      const db = new Database(this.dbPath, { create: true });
-      db.exec("PRAGMA journal_mode = WAL;");
+      db = new Database(this.dbPath, { create: true });
+      db.exec("PRAGMA busy_timeout = 2000;");
+      const journalRow = db.query("PRAGMA journal_mode = WAL;").get();
+      if (journalRow?.journal_mode?.toLowerCase() !== "wal") {
+        try {
+          db.close();
+        } catch {}
+        return null;
+      }
       db.exec("PRAGMA synchronous = NORMAL;");
       db.exec("PRAGMA temp_store = MEMORY;");
       const versionRow = db.query("PRAGMA user_version;").get();
       const schemaVersion = versionRow?.user_version ?? 0;
       if (schemaVersion !== CACHE_FORMAT_VERSION) {
-        db.exec("DROP TABLE IF EXISTS shards;");
+        try {
+          db.exec("DELETE FROM shards;");
+        } catch {}
         db.exec(`PRAGMA user_version = ${CACHE_FORMAT_VERSION};`);
       }
       db.exec(`
 				CREATE TABLE IF NOT EXISTS shards (
-					rel_path TEXT NOT NULL PRIMARY KEY,
+					rel_path TEXT NOT NULL,
 					content_hash TEXT NOT NULL,
 					payload BLOB NOT NULL,
-					mtime REAL NOT NULL
+					mtime REAL NOT NULL,
+					PRIMARY KEY (rel_path, content_hash)
 				);
-				CREATE INDEX IF NOT EXISTS idx_shards_content_hash ON shards(content_hash);
 				CREATE INDEX IF NOT EXISTS idx_shards_mtime ON shards(mtime);
 			`);
-      this.#getStmt = db.prepare("SELECT payload, content_hash FROM shards WHERE rel_path = ?1");
+      this.#getStmt = db.prepare("SELECT payload FROM shards WHERE rel_path = ?1 AND content_hash = ?2");
       this.#saveStmt = db.prepare(`
 				INSERT INTO shards (rel_path, content_hash, payload, mtime)
 				VALUES (?1, ?2, ?3, ?4)
-				ON CONFLICT(rel_path) DO UPDATE SET
-					content_hash = excluded.content_hash,
-					payload = excluded.payload,
+				ON CONFLICT(rel_path, content_hash) DO UPDATE SET
 					mtime = excluded.mtime
 			`);
-      this.#updateMtimeStmt = db.prepare("UPDATE shards SET mtime = ?1 WHERE rel_path = ?2");
-      this.#deleteStmt = db.prepare("DELETE FROM shards WHERE rel_path = ?1");
+      this.#deleteStmt = db.prepare("DELETE FROM shards WHERE rel_path = ?1 AND content_hash = ?2");
       this.#totalSizeStmt = db.prepare("SELECT COALESCE(SUM(LENGTH(payload)), 0) as total FROM shards");
-      this.#oldestShardsStmt = db.prepare("SELECT rel_path, LENGTH(payload) as size FROM shards ORDER BY mtime ASC");
+      this.#oldestShardsStmt = db.prepare("SELECT rowid, LENGTH(payload) as size FROM shards ORDER BY mtime ASC LIMIT ?1");
       this.#deleteAllStmt = db.prepare("DELETE FROM shards");
       this.#db = db;
       return db;
     } catch {
+      if (db) {
+        try {
+          db.close();
+        } catch {}
+      }
       return null;
     }
   }
@@ -13141,21 +13155,15 @@ class DiskCacheManager {
       if (!db || !this.#getStmt)
         return null;
       const normalizedRelPath = relPath.replace(/\\/g, "/");
-      const row = this.#getStmt.get(normalizedRelPath);
-      if (!row || row.content_hash !== contentHash) {
+      const row = this.#getStmt.get(normalizedRelPath, contentHash);
+      if (!row) {
         return null;
       }
       const payloadBuf = Buffer.isBuffer(row.payload) ? row.payload : Buffer.from(row.payload.buffer, row.payload.byteOffset, row.payload.byteLength);
       const shard = unpackBinaryShard(payloadBuf);
-      if (shard && shard.contentHash === contentHash && typeof shard.sourceId === "string" && Array.isArray(shard.frames)) {
-        try {
-          this.#updateMtimeStmt?.run(Date.now(), normalizedRelPath);
-        } catch {}
+      if (shard && shard.contentHash === contentHash && Array.isArray(shard.frames)) {
         return shard;
       }
-      try {
-        this.#deleteStmt?.run(normalizedRelPath);
-      } catch {}
       return null;
     } catch {
       return null;
@@ -13172,6 +13180,44 @@ class DiskCacheManager {
       this.#saveStmt.run(normalizedRelPath, shard.contentHash, payload, Date.now());
     } catch {}
   }
+  async deleteShard(relPath, contentHash) {
+    try {
+      const db = this.#getDb();
+      if (!db || !this.#deleteStmt)
+        return;
+      const normalizedRelPath = relPath.replace(/\\/g, "/");
+      this.#deleteStmt.run(normalizedRelPath, contentHash);
+    } catch {}
+  }
+  async saveShards(items) {
+    if (items.length === 0)
+      return;
+    try {
+      const db = this.#getDb();
+      if (!db || !this.#saveStmt)
+        return;
+      const stmt = this.#saveStmt;
+      const root = this.rootDir;
+      const now = Date.now();
+      const prepared = [];
+      for (const item of items) {
+        const targetRelPath = item.relPath ?? (path3.isAbsolute(item.shard.sourceId) ? path3.relative(root, item.shard.sourceId) : item.shard.sourceId);
+        const normalizedRelPath = targetRelPath.replace(/\\/g, "/");
+        const payload = packBinaryShard(item.shard);
+        prepared.push({
+          relPath: normalizedRelPath,
+          hash: item.shard.contentHash,
+          payload
+        });
+      }
+      const tx = db.transaction((entries) => {
+        for (const entry of entries) {
+          stmt.run(entry.relPath, entry.hash, entry.payload, now);
+        }
+      });
+      tx(prepared);
+    } catch {}
+  }
   async prune(maxBytes) {
     const budget = maxBytes !== undefined ? maxBytes : this.maxBytes;
     try {
@@ -13180,53 +13226,41 @@ class DiskCacheManager {
         return;
       if (budget <= 0) {
         this.#deleteAllStmt?.run();
-        try {
-          db.exec("VACUUM;");
-        } catch {}
         return;
       }
-      const totalRow = this.#totalSizeStmt?.get();
-      let totalSize = totalRow?.total ?? 0;
-      if (totalSize <= budget) {
-        return;
-      }
-      const oldestShards = this.#oldestShardsStmt?.all() ?? [];
-      let deletedAny = false;
-      for (const entry of oldestShards) {
+      for (let iter = 0;iter < 10; iter++) {
+        const totalRow = this.#totalSizeStmt?.get();
+        const totalSize = totalRow?.total ?? 0;
         if (totalSize <= budget) {
           break;
         }
-        try {
-          this.#deleteStmt?.run(entry.rel_path);
-          totalSize -= entry.size;
-          deletedAny = true;
-        } catch {}
-      }
-      if (deletedAny) {
-        try {
-          db.exec("VACUUM;");
-        } catch {}
+        const excess = totalSize - budget;
+        const rows = this.#oldestShardsStmt?.all(100) ?? [];
+        if (rows.length === 0)
+          break;
+        const rowidsToDelete = [];
+        let freed = 0;
+        for (const r of rows) {
+          rowidsToDelete.push(r.rowid);
+          freed += r.size;
+          if (freed >= excess)
+            break;
+        }
+        if (rowidsToDelete.length > 0) {
+          const deleteBatchStmt = db.prepare(`DELETE FROM shards WHERE rowid IN (${rowidsToDelete.join(",")})`);
+          deleteBatchStmt.run();
+        } else {
+          break;
+        }
       }
     } catch {}
   }
   async clear() {
     try {
-      if (this.#db) {
-        try {
-          this.#db.close();
-        } catch {}
-        this.#db = null;
-        this.#getStmt = null;
-        this.#saveStmt = null;
-        this.#updateMtimeStmt = null;
-        this.#deleteStmt = null;
-        this.#totalSizeStmt = null;
-        this.#oldestShardsStmt = null;
-        this.#deleteAllStmt = null;
+      const db = this.#getDb();
+      if (db && this.#deleteAllStmt) {
+        this.#deleteAllStmt.run();
       }
-      await fs.unlink(this.dbPath).catch(() => {});
-      await fs.unlink(`${this.dbPath}-wal`).catch(() => {});
-      await fs.unlink(`${this.dbPath}-shm`).catch(() => {});
     } catch {}
   }
   close() {
@@ -13238,12 +13272,108 @@ class DiskCacheManager {
       this.#db = null;
       this.#getStmt = null;
       this.#saveStmt = null;
-      this.#updateMtimeStmt = null;
       this.#deleteStmt = null;
       this.#totalSizeStmt = null;
       this.#oldestShardsStmt = null;
       this.#deleteAllStmt = null;
     }
+  }
+}
+async function cleanupLegacyCacheFiles(customCacheDir) {
+  const baseDir = customCacheDir ?? getDefaultCacheDir();
+  try {
+    if (!fsSync.existsSync(baseDir))
+      return;
+    const entries = await fs.readdir(baseDir);
+    for (const entry of entries) {
+      if (entry.endsWith(".sqlite") && !entry.includes(`_v${CACHE_FORMAT_VERSION}.sqlite`)) {
+        await fs.unlink(path3.join(baseDir, entry)).catch(() => {});
+        await fs.unlink(path3.join(baseDir, `${entry}-wal`)).catch(() => {});
+        await fs.unlink(path3.join(baseDir, `${entry}-shm`)).catch(() => {});
+      }
+    }
+  } catch {}
+}
+
+// src/repo-context.ts
+import * as crypto2 from "crypto";
+import * as fsSync2 from "fs";
+import * as fs2 from "fs/promises";
+import * as path4 from "path";
+function canonicalizePath(targetPath) {
+  const resolved = path4.resolve(targetPath);
+  try {
+    if (fsSync2.existsSync(resolved)) {
+      return fsSync2.realpathSync(resolved);
+    }
+  } catch {}
+  return resolved;
+}
+function isOmpWorktreePath(targetPath) {
+  const normalized = targetPath.replace(/\\/g, "/");
+  return normalized.includes("/.omp/wt/") || normalized.includes("/.omp/worktrees/");
+}
+async function resolveRepositoryContext(cwd, signal) {
+  const canonicalCwd = canonicalizePath(cwd);
+  try {
+    const { stdout } = await execGit([
+      "rev-parse",
+      "--path-format=absolute",
+      "--show-toplevel",
+      "--git-dir",
+      "--git-common-dir"
+    ], canonicalCwd, { signal });
+    const lines = stdout.split(`
+`).map((l) => l.trim()).filter(Boolean);
+    const resolveEntry = (val) => {
+      if (!val)
+        return "";
+      return path4.isAbsolute(val) ? val : path4.resolve(canonicalCwd, val);
+    };
+    const workspaceRoot = canonicalizePath(resolveEntry(lines[0]));
+    const gitDir = canonicalizePath(resolveEntry(lines[1] || path4.join(workspaceRoot, ".git")));
+    const commonGitDir = canonicalizePath(resolveEntry(lines[2] || lines[1] || path4.join(workspaceRoot, ".git")));
+    let repositoryObjectDir = path4.join(commonGitDir, "objects");
+    const isOmpIsolation = isOmpWorktreePath(workspaceRoot) || isOmpWorktreePath(canonicalCwd);
+    if (isOmpIsolation && gitDir === commonGitDir) {
+      const alternatesFile = path4.join(gitDir, "objects", "info", "alternates");
+      try {
+        if (fsSync2.existsSync(alternatesFile)) {
+          const content = await fs2.readFile(alternatesFile, "utf-8");
+          const altLines = content.split(`
+`).map((l) => l.trim()).filter((l) => l && !l.startsWith("#"));
+          for (const line of altLines) {
+            const resolvedAlt = path4.isAbsolute(line) ? line : path4.resolve(path4.join(gitDir, "objects"), line);
+            const canonicalAlt = canonicalizePath(resolvedAlt);
+            if (fsSync2.existsSync(canonicalAlt)) {
+              repositoryObjectDir = canonicalAlt;
+              break;
+            }
+          }
+        }
+      } catch {}
+    }
+    repositoryObjectDir = canonicalizePath(repositoryObjectDir);
+    const repositoryKey = crypto2.createHash("sha256").update(`git-object-dir\x00${repositoryObjectDir}`).digest("hex").slice(0, 16);
+    return {
+      workspaceRoot,
+      isGit: true,
+      gitDir,
+      commonGitDir,
+      repositoryObjectDir,
+      repositoryKey,
+      isOmpIsolation
+    };
+  } catch {
+    const repositoryObjectDir = path4.join(canonicalCwd, ".non-git");
+    const repositoryKey = crypto2.createHash("sha256").update(`directory\x00${canonicalCwd}`).digest("hex").slice(0, 16);
+    return {
+      workspaceRoot: canonicalCwd,
+      isGit: false,
+      repositoryObjectDir,
+      repositoryKey,
+      isOmpIsolation: false
+    };
   }
 }
 
@@ -13355,18 +13485,20 @@ function notifyLateFindings(clones) {
   for (const clone2 of clones) {
     const srcA = clone2.duplicationA.sourceId;
     const srcB = clone2.duplicationB.sourceId;
-    const resA = path4.resolve(srcA);
-    const resB = path4.resolve(srcB);
-    const isWatchedA = watchedRevisions.has(srcA) || watchedRevisions.has(resA);
-    const isWatchedB = watchedRevisions.has(srcB) || watchedRevisions.has(resB);
+    const resA = path5.resolve(srcA);
+    const resB = path5.resolve(srcB);
+    const canA = canonicalizePath(srcA);
+    const canB = canonicalizePath(srcB);
+    const isWatchedA = watchedRevisions.has(srcA) || watchedRevisions.has(resA) || watchedRevisions.has(canA);
+    const isWatchedB = watchedRevisions.has(srcB) || watchedRevisions.has(resB) || watchedRevisions.has(canB);
     if (isWatchedA || isWatchedB) {
       if (isWatchedA) {
-        const entry = watchedRevisions.get(srcA) ?? watchedRevisions.get(resA);
+        const entry = watchedRevisions.get(srcA) ?? watchedRevisions.get(resA) ?? watchedRevisions.get(canA);
         if (entry)
           entry.lastKnownCloneCount++;
       }
       if (isWatchedB) {
-        const entry = watchedRevisions.get(srcB) ?? watchedRevisions.get(resB);
+        const entry = watchedRevisions.get(srcB) ?? watchedRevisions.get(resB) ?? watchedRevisions.get(canB);
         if (entry)
           entry.lastKnownCloneCount++;
       }
@@ -13377,16 +13509,16 @@ function notifyLateFindings(clones) {
 function cacheSourceShard(filePath, content) {
   if (!currentDiskCache)
     return;
-  const contentHash = crypto2.createHash("sha256").update(content).digest("hex");
-  const relPath = path4.relative(currentRootDir, filePath).replace(/\\/g, "/");
+  const contentHash = crypto3.createHash("sha256").update(content).digest("hex");
+  const relPath = path5.relative(currentRootDir, filePath).replace(/\\/g, "/");
   const shard = currentIndex.exportSourceShard(filePath, contentHash);
   if (shard) {
     currentDiskCache.saveShard(shard, relPath).catch(() => {});
   }
 }
 function yieldTask() {
-  const { promise, resolve: resolve4 } = Promise.withResolvers();
-  setTimeout(resolve4, 0);
+  const { promise, resolve: resolve5 } = Promise.withResolvers();
+  setTimeout(resolve5, 0);
   return promise;
 }
 async function runBaselineIndexing(rootDir, options, signal) {
@@ -13453,11 +13585,11 @@ async function runBaselineIndexing(rootDir, options, signal) {
           return null;
         }
         try {
-          const stat2 = await fs2.stat(filePath);
+          const stat2 = await fs3.stat(filePath);
           if (stat2.size > MAX_FILE_SIZE_BYTES || stat2.size <= 0) {
             return null;
           }
-          const resolved = path4.resolve(filePath);
+          const resolved = path5.resolve(filePath);
           if (currentIndex.hasSource(filePath) || currentIndex.hasSource(resolved)) {
             return {
               filePath,
@@ -13470,12 +13602,12 @@ async function runBaselineIndexing(rootDir, options, signal) {
               alreadyIndexed: true
             };
           }
-          const content = await fs2.readFile(filePath, "utf8");
+          const content = await fs3.readFile(filePath, "utf8");
           if (signal.aborted || isGeneratedContent(content)) {
             return null;
           }
-          const contentHash = crypto2.createHash("sha256").update(content).digest("hex");
-          const relPath = path4.relative(rootDir, filePath).replace(/\\/g, "/");
+          const contentHash = crypto3.createHash("sha256").update(content).digest("hex");
+          const relPath = path5.relative(rootDir, filePath).replace(/\\/g, "/");
           const cachedShard = currentDiskCache ? await currentDiskCache.getShard(relPath, contentHash) : null;
           let isNewlyTokenized = false;
           let shard = cachedShard;
@@ -13499,6 +13631,7 @@ async function runBaselineIndexing(rootDir, options, signal) {
       }));
       if (signal.aborted)
         return { indexedCount, status: "cancelled" };
+      const shardsToSave = [];
       for (const item of fileItems) {
         if (!item)
           continue;
@@ -13513,7 +13646,10 @@ async function runBaselineIndexing(rootDir, options, signal) {
           newClones = currentIndex.hydrateSourceShard(item.cachedShard);
           if (item.isNewlyTokenized) {
             if (currentDiskCache && item.contentHash && item.relPath) {
-              currentDiskCache.saveShard(item.cachedShard, item.relPath).catch(() => {});
+              shardsToSave.push({
+                shard: item.cachedShard,
+                relPath: item.relPath
+              });
             }
           } else {
             cachedCount++;
@@ -13523,7 +13659,7 @@ async function runBaselineIndexing(rootDir, options, signal) {
           if (currentDiskCache && item.contentHash && item.relPath) {
             const shard = currentIndex.exportSourceShard(item.filePath, item.contentHash);
             if (shard) {
-              currentDiskCache.saveShard(shard, item.relPath).catch(() => {});
+              shardsToSave.push({ shard, relPath: item.relPath });
             }
           }
         }
@@ -13532,6 +13668,9 @@ async function runBaselineIndexing(rootDir, options, signal) {
         if (newClones.length > 0) {
           notifyLateFindings(newClones);
         }
+      }
+      if (shardsToSave.length > 0 && currentDiskCache) {
+        await currentDiskCache.saveShards(shardsToSave);
       }
       const processedCount = Math.min(i + batch.length, totalFiles);
       const percentage = totalFiles > 0 ? Math.round(processedCount / totalFiles * 100) : 100;
@@ -13619,12 +13758,12 @@ async function runIncrementalGitReconciliation(rootDir, options, signal) {
         const oldRelPath = entries[i]?.trim();
         i++;
         if (oldRelPath) {
-          const oldFullPath = path4.resolve(rootDir, oldRelPath);
+          const oldFullPath = path5.resolve(rootDir, oldRelPath);
           currentIndex.removeSource(oldFullPath);
           currentIndex.removeSource(oldRelPath);
         }
       }
-      const fullPath = path4.resolve(rootDir, relPath);
+      const fullPath = path5.resolve(rootDir, relPath);
       if (ignoreFilter(relPath)) {
         currentIndex.removeSource(fullPath);
         currentIndex.removeSource(relPath);
@@ -13639,12 +13778,12 @@ async function runIncrementalGitReconciliation(rootDir, options, signal) {
             currentIndex.removeSource(fullPath);
             continue;
           }
-          const stat2 = await fs2.stat(fullPath);
+          const stat2 = await fs3.stat(fullPath);
           if (stat2.size > MAX_FILE_SIZE_BYTES || stat2.size <= 0) {
             currentIndex.removeSource(fullPath);
             continue;
           }
-          const content = await fs2.readFile(fullPath, "utf8");
+          const content = await fs3.readFile(fullPath, "utf8");
           if (signal.aborted)
             return {
               indexedCount: currentIndex.stats().sourceCount,
@@ -13689,16 +13828,17 @@ async function handleWorkerRequest(msg) {
   switch (msg.type) {
     case "openWorkspace": {
       const { rootDir, options } = msg.payload;
-      if (currentRootDir === rootDir && areOptionsEqual(currentOptions, options) && (isBaselineComplete || isBaselineIndexing)) {
+      const canonicalRootDir = canonicalizePath(rootDir);
+      if ((currentRootDir === canonicalRootDir || currentRootDir === rootDir) && areOptionsEqual(currentOptions, options) && (isBaselineComplete || isBaselineIndexing)) {
         if (isBaselineComplete) {
           if (activeAbortController) {
             activeAbortController.abort();
           }
           activeAbortController = new AbortController;
-          const recResult = await runIncrementalGitReconciliation(rootDir, options, activeAbortController.signal);
+          const recResult = await runIncrementalGitReconciliation(currentRootDir, options, activeAbortController.signal);
           self.postMessage(createSuccessResponse(msg.id, {
             started: true,
-            rootDir,
+            rootDir: currentRootDir,
             reused: true,
             indexedCount: recResult.indexedCount,
             status: recResult.status
@@ -13706,7 +13846,7 @@ async function handleWorkerRequest(msg) {
         } else {
           self.postMessage(createSuccessResponse(msg.id, {
             started: true,
-            rootDir,
+            rootDir: currentRootDir,
             reused: true,
             indexedCount: currentIndex.stats().sourceCount,
             status: "complete"
@@ -13722,11 +13862,14 @@ async function handleWorkerRequest(msg) {
         currentDiskCache.close();
         currentDiskCache = null;
       }
-      currentRootDir = rootDir;
+      const repoContext = await resolveRepositoryContext(rootDir, activeAbortController.signal);
+      const effectiveRoot = repoContext.workspaceRoot;
+      currentRootDir = effectiveRoot;
       currentOptions = options;
       currentIndex = new SourceAwareCloneIndex(options);
       currentDiskCache = new DiskCacheManager({
-        rootDir,
+        rootDir: effectiveRoot,
+        repositoryKey: repoContext.repositoryKey,
         cacheDir: options?.cacheDir,
         config: options,
         maxBytes: options?.maxCacheBytes
@@ -13734,12 +13877,13 @@ async function handleWorkerRequest(msg) {
       watchedRevisions.clear();
       isBaselineIndexing = true;
       isBaselineComplete = false;
+      cleanupLegacyCacheFiles(options?.cacheDir).catch(() => {});
       self.postMessage(createSuccessResponse(msg.id, {
         started: true,
-        rootDir,
+        rootDir: effectiveRoot,
         reused: false
       }));
-      runBaselineIndexing(rootDir, options, activeAbortController.signal).catch(() => {});
+      runBaselineIndexing(effectiveRoot, options, activeAbortController.signal).catch(() => {});
       break;
     }
     case "checkSnippet": {
@@ -13751,17 +13895,19 @@ async function handleWorkerRequest(msg) {
     case "checkAndUpdate": {
       const { filePath, content, format, revision = 1 } = msg.payload;
       const clones = currentIndex.updateSource(filePath, content, format);
-      const resolvedPath = path4.resolve(filePath);
+      const canonicalFilePath = canonicalizePath(filePath);
+      const resolvedPath = path5.resolve(filePath);
       cacheSourceShard(filePath, content);
-      const fileClones = clones.filter((c) => c.duplicationA.sourceId === filePath || c.duplicationB.sourceId === filePath || path4.resolve(c.duplicationA.sourceId) === resolvedPath || path4.resolve(c.duplicationB.sourceId) === resolvedPath);
+      const fileClones = clones.filter((c) => c.duplicationA.sourceId === filePath || c.duplicationB.sourceId === filePath || path5.resolve(c.duplicationA.sourceId) === resolvedPath || path5.resolve(c.duplicationB.sourceId) === resolvedPath || canonicalizePath(c.duplicationA.sourceId) === canonicalFilePath || canonicalizePath(c.duplicationB.sourceId) === canonicalFilePath);
       const watchEntry = {
         revision,
         lastKnownCloneCount: fileClones.length
       };
       watchedRevisions.set(filePath, watchEntry);
       watchedRevisions.set(resolvedPath, watchEntry);
+      watchedRevisions.set(canonicalFilePath, watchEntry);
       self.postMessage(createSuccessResponse(msg.id, {
-        clones,
+        clones: fileClones,
         isComplete: isBaselineComplete
       }));
       break;
@@ -13793,9 +13939,9 @@ async function handleWorkerRequest(msg) {
               currentIndex.removeSource(fileEntry.filePath);
               continue;
             }
-            const stat2 = await fs2.stat(fileEntry.filePath);
+            const stat2 = await fs3.stat(fileEntry.filePath);
             if (stat2.size <= MAX_FILE_SIZE_BYTES && stat2.size > 0) {
-              const content = await fs2.readFile(fileEntry.filePath, "utf8");
+              const content = await fs3.readFile(fileEntry.filePath, "utf8");
               if (!isGeneratedContent(content)) {
                 currentIndex.updateSource(fileEntry.filePath, content);
                 cacheSourceShard(fileEntry.filePath, content);
@@ -13839,9 +13985,9 @@ async function handleWorkerRequest(msg) {
             try {
               if (!getSupportedCodeFormat(file, optionsToUse?.formatsExts))
                 continue;
-              const stat2 = await fs2.stat(file);
+              const stat2 = await fs3.stat(file);
               if (stat2.size <= MAX_FILE_SIZE_BYTES && stat2.size > 0) {
-                const content = await fs2.readFile(file, "utf8");
+                const content = await fs3.readFile(file, "utf8");
                 if (!isGeneratedContent(content)) {
                   indexToUse.addSource(file, content);
                 }

@@ -2,10 +2,12 @@ import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { getDefaultCacheDir } from "./disk-cache";
+import { resolveRepositoryContext } from "./repo-context";
 
 interface ProjectStateEntry {
 	enabled: boolean;
 	updatedAt?: string;
+	displayPath?: string;
 }
 
 export interface ProjectsStateFile {
@@ -102,9 +104,11 @@ export async function isProjectEnabled(
 	projectDir: string,
 	customCacheDir?: string,
 ): Promise<boolean> {
-	const normalized = normalizeProjectPath(projectDir);
+	const ctx = await resolveRepositoryContext(projectDir).catch(() => null);
+	const key = ctx?.repositoryKey ?? normalizeProjectPath(projectDir);
 	const state = await loadProjectsState(customCacheDir);
-	const entry = state.projects[normalized];
+	const entry =
+		state.projects[key] ?? state.projects[normalizeProjectPath(projectDir)];
 	if (entry && typeof entry.enabled === "boolean") {
 		return entry.enabled;
 	}
@@ -119,11 +123,13 @@ export async function setProjectEnabled(
 	enabled: boolean,
 	customCacheDir?: string,
 ): Promise<void> {
-	const normalized = normalizeProjectPath(projectDir);
+	const ctx = await resolveRepositoryContext(projectDir).catch(() => null);
+	const key = ctx?.repositoryKey ?? normalizeProjectPath(projectDir);
 	const state = await loadProjectsState(customCacheDir);
-	state.projects[normalized] = {
+	state.projects[key] = {
 		enabled,
 		updatedAt: new Date().toISOString(),
+		displayPath: normalizeProjectPath(projectDir),
 	};
 	await saveProjectsState(state, customCacheDir);
 }

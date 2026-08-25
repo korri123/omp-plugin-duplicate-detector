@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { execGit } from "../src/jscpd-engine";
 import {
 	getProjectsStateFilePath,
 	isProjectEnabled,
@@ -118,10 +119,17 @@ describe("Project State & Persistence", () => {
 			// Verify file content on disk
 			const state = await loadProjectsState(tempCacheDir);
 			const normalized = normalizeProjectPath(projectDir);
-			expect(state.projects[normalized]?.enabled).toBe(false);
-			expect(state.projects[normalized]?.updatedAt).toBeDefined();
+			const entry =
+				Object.values(state.projects).find(
+					(e) =>
+						e &&
+						typeof e === "object" &&
+						"displayPath" in e &&
+						e.displayPath === normalized,
+				) ?? state.projects[normalized];
+			expect(entry?.enabled).toBe(false);
+			expect(entry?.updatedAt).toBeDefined();
 		});
-
 		it("toggles project back to enabled", async () => {
 			const projectDir = "/workspace/my-cool-project";
 			await setProjectEnabled(projectDir, false, tempCacheDir);
@@ -140,6 +148,33 @@ describe("Project State & Persistence", () => {
 
 			expect(await isProjectEnabled(proj1, tempCacheDir)).toBe(false);
 			expect(await isProjectEnabled(proj2, tempCacheDir)).toBe(true);
+		});
+
+		it("inherits project enablement across isolated CoW worktrees with alternates", async () => {
+			const primaryRepo = path.join(tempCacheDir, "primary-repo");
+			await fs.mkdir(primaryRepo, { recursive: true });
+			await execGit(["init", "-q"], primaryRepo);
+			const primaryObjects = path.join(primaryRepo, ".git", "objects");
+
+			const cowWorktree = path.join(tempCacheDir, ".omp", "wt", "t123456", "m");
+			await fs.mkdir(cowWorktree, { recursive: true });
+			await execGit(["init", "-q"], cowWorktree);
+			const cowObjectsInfo = path.join(cowWorktree, ".git", "objects", "info");
+			await fs.mkdir(cowObjectsInfo, { recursive: true });
+			await fs.writeFile(
+				path.join(cowObjectsInfo, "alternates"),
+				`${primaryObjects}\n`,
+			);
+			// Disable primary repo
+			await setProjectEnabled(primaryRepo, false, tempCacheDir);
+			expect(await isProjectEnabled(primaryRepo, tempCacheDir)).toBe(false);
+
+			// Isolated CoW worktree must inherit disabled state from primary
+			expect(await isProjectEnabled(cowWorktree, tempCacheDir)).toBe(false);
+
+			// Enabling from CoW worktree enables primary
+			await setProjectEnabled(cowWorktree, true, tempCacheDir);
+			expect(await isProjectEnabled(primaryRepo, tempCacheDir)).toBe(true);
 		});
 	});
 });

@@ -473,15 +473,19 @@ export class DuplicateDetectorCoordinator extends EventEmitter<CoordinatorEvents
 	/**
 	 * Reconcile multiple modified or removed files with the index.
 	 */
-	async reconcile(files: ReconcileFileEntry[]): Promise<void> {
+	async reconcile(
+		files: ReconcileFileEntry[],
+	): Promise<{ reconciledCount: number }> {
 		try {
 			const payload: ReconcilePayload = { files };
-			await this.#sendRequest<{ reconciledCount: number }>(
+			return await this.#sendRequest<{ reconciledCount: number }>(
 				"reconcile",
 				payload,
 			);
 		} catch (err) {
-			this.emit("error", err instanceof Error ? err : new Error(String(err)));
+			const error = err instanceof Error ? err : new Error(String(err));
+			this.emit("error", error);
+			throw error;
 		}
 	}
 

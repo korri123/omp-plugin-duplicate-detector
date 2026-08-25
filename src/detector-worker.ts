@@ -8,7 +8,7 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { IClone } from "@jscpd/core";
-import { DiskCacheManager } from "./disk-cache";
+import { cleanupLegacyCacheFiles, DiskCacheManager } from "./disk-cache";
 import {
 	type BaselineStatus,
 	createIgnoreFilter,
@@ -22,6 +22,7 @@ import {
 	MAX_INDEXED_FILES,
 	MAX_TOTAL_SOURCE_BYTES,
 } from "./jscpd-engine";
+import { canonicalizePath, resolveRepositoryContext } from "./repo-context";
 import {
 	type SerializedSourceShard,
 	SourceAwareCloneIndex,
@@ -87,24 +88,37 @@ function areOptionsEqual(a?: WorkspaceOptions, b?: WorkspaceOptions): boolean {
 	const bFormats = b.formatsExts ? JSON.stringify(b.formatsExts) : "";
 	return aFormats === bFormats;
 }
-
 function notifyLateFindings(clones: IClone[]): void {
 	for (const clone of clones) {
 		const srcA = clone.duplicationA.sourceId;
 		const srcB = clone.duplicationB.sourceId;
 		const resA = path.resolve(srcA);
 		const resB = path.resolve(srcB);
+		const canA = canonicalizePath(srcA);
+		const canB = canonicalizePath(srcB);
 
-		const isWatchedA = watchedRevisions.has(srcA) || watchedRevisions.has(resA);
-		const isWatchedB = watchedRevisions.has(srcB) || watchedRevisions.has(resB);
+		const isWatchedA =
+			watchedRevisions.has(srcA) ||
+			watchedRevisions.has(resA) ||
+			watchedRevisions.has(canA);
+		const isWatchedB =
+			watchedRevisions.has(srcB) ||
+			watchedRevisions.has(resB) ||
+			watchedRevisions.has(canB);
 
 		if (isWatchedA || isWatchedB) {
 			if (isWatchedA) {
-				const entry = watchedRevisions.get(srcA) ?? watchedRevisions.get(resA);
+				const entry =
+					watchedRevisions.get(srcA) ??
+					watchedRevisions.get(resA) ??
+					watchedRevisions.get(canA);
 				if (entry) entry.lastKnownCloneCount++;
 			}
 			if (isWatchedB) {
-				const entry = watchedRevisions.get(srcB) ?? watchedRevisions.get(resB);
+				const entry =
+					watchedRevisions.get(srcB) ??
+					watchedRevisions.get(resB) ??
+					watchedRevisions.get(canB);
 				if (entry) entry.lastKnownCloneCount++;
 			}
 			self.postMessage(createLateFindingEvent(clone));
@@ -307,6 +321,10 @@ async function runBaselineIndexing(
 			if (signal.aborted) return { indexedCount, status: "cancelled" };
 
 			// Ingest items into index and notify late findings
+			const shardsToSave: Array<{
+				shard: SerializedSourceShard;
+				relPath: string;
+			}> = [];
 			for (const item of fileItems) {
 				if (!item) continue;
 
@@ -323,9 +341,10 @@ async function runBaselineIndexing(
 					newClones = currentIndex.hydrateSourceShard(item.cachedShard);
 					if (item.isNewlyTokenized) {
 						if (currentDiskCache && item.contentHash && item.relPath) {
-							currentDiskCache
-								.saveShard(item.cachedShard, item.relPath)
-								.catch(() => {});
+							shardsToSave.push({
+								shard: item.cachedShard,
+								relPath: item.relPath,
+							});
 						}
 					} else {
 						cachedCount++;
@@ -338,7 +357,7 @@ async function runBaselineIndexing(
 							item.contentHash,
 						);
 						if (shard) {
-							currentDiskCache.saveShard(shard, item.relPath).catch(() => {});
+							shardsToSave.push({ shard, relPath: item.relPath });
 						}
 					}
 				}
@@ -348,6 +367,10 @@ async function runBaselineIndexing(
 				if (newClones.length > 0) {
 					notifyLateFindings(newClones);
 				}
+			}
+
+			if (shardsToSave.length > 0 && currentDiskCache) {
+				await currentDiskCache.saveShards(shardsToSave);
 			}
 
 			const processedCount = Math.min(i + batch.length, totalFiles);
@@ -543,11 +566,12 @@ async function handleWorkerRequest(msg: WorkerRequestMessage): Promise<void> {
 	switch (msg.type) {
 		case "openWorkspace": {
 			const { rootDir, options } = msg.payload;
+			const canonicalRootDir = canonicalizePath(rootDir);
 
-			// If rootDir === currentRootDir and options match and baseline is already complete or indexing,
+			// If canonicalRootDir === currentRootDir and options match and baseline is already complete or indexing,
 			// avoid total reset; trigger an incremental git status check instead.
 			if (
-				currentRootDir === rootDir &&
+				(currentRootDir === canonicalRootDir || currentRootDir === rootDir) &&
 				areOptionsEqual(currentOptions, options) &&
 				(isBaselineComplete || isBaselineIndexing)
 			) {
@@ -557,14 +581,14 @@ async function handleWorkerRequest(msg: WorkerRequestMessage): Promise<void> {
 					}
 					activeAbortController = new AbortController();
 					const recResult = await runIncrementalGitReconciliation(
-						rootDir,
+						currentRootDir,
 						options,
 						activeAbortController.signal,
 					);
 					self.postMessage(
 						createSuccessResponse(msg.id, {
 							started: true,
-							rootDir,
+							rootDir: currentRootDir,
 							reused: true,
 							indexedCount: recResult.indexedCount,
 							status: recResult.status,
@@ -574,7 +598,7 @@ async function handleWorkerRequest(msg: WorkerRequestMessage): Promise<void> {
 					self.postMessage(
 						createSuccessResponse(msg.id, {
 							started: true,
-							rootDir,
+							rootDir: currentRootDir,
 							reused: true,
 							indexedCount: currentIndex.stats().sourceCount,
 							status: "complete" as BaselineStatus,
@@ -594,11 +618,17 @@ async function handleWorkerRequest(msg: WorkerRequestMessage): Promise<void> {
 				currentDiskCache = null;
 			}
 
-			currentRootDir = rootDir;
+			const repoContext = await resolveRepositoryContext(
+				rootDir,
+				activeAbortController.signal,
+			);
+			const effectiveRoot = repoContext.workspaceRoot;
+			currentRootDir = effectiveRoot;
 			currentOptions = options;
 			currentIndex = new SourceAwareCloneIndex(options);
 			currentDiskCache = new DiskCacheManager({
-				rootDir,
+				rootDir: effectiveRoot,
+				repositoryKey: repoContext.repositoryKey,
 				cacheDir: options?.cacheDir,
 				config: options,
 				maxBytes: options?.maxCacheBytes,
@@ -607,18 +637,23 @@ async function handleWorkerRequest(msg: WorkerRequestMessage): Promise<void> {
 			isBaselineIndexing = true;
 			isBaselineComplete = false;
 
+			// Clean up legacy pre-v4 caches in background
+			cleanupLegacyCacheFiles(options?.cacheDir).catch(() => {});
+
 			self.postMessage(
 				createSuccessResponse(msg.id, {
 					started: true,
-					rootDir,
+					rootDir: effectiveRoot,
 					reused: false,
 				}),
 			);
 
 			// Run background indexing task (posts complete event when finished)
-			runBaselineIndexing(rootDir, options, activeAbortController.signal).catch(
-				() => {},
-			);
+			runBaselineIndexing(
+				effectiveRoot,
+				options,
+				activeAbortController.signal,
+			).catch(() => {});
 			break;
 		}
 
@@ -632,6 +667,7 @@ async function handleWorkerRequest(msg: WorkerRequestMessage): Promise<void> {
 		case "checkAndUpdate": {
 			const { filePath, content, format, revision = 1 } = msg.payload;
 			const clones = currentIndex.updateSource(filePath, content, format);
+			const canonicalFilePath = canonicalizePath(filePath);
 			const resolvedPath = path.resolve(filePath);
 
 			cacheSourceShard(filePath, content);
@@ -641,7 +677,9 @@ async function handleWorkerRequest(msg: WorkerRequestMessage): Promise<void> {
 					c.duplicationA.sourceId === filePath ||
 					c.duplicationB.sourceId === filePath ||
 					path.resolve(c.duplicationA.sourceId) === resolvedPath ||
-					path.resolve(c.duplicationB.sourceId) === resolvedPath,
+					path.resolve(c.duplicationB.sourceId) === resolvedPath ||
+					canonicalizePath(c.duplicationA.sourceId) === canonicalFilePath ||
+					canonicalizePath(c.duplicationB.sourceId) === canonicalFilePath,
 			);
 
 			const watchEntry = {
@@ -650,10 +688,11 @@ async function handleWorkerRequest(msg: WorkerRequestMessage): Promise<void> {
 			};
 			watchedRevisions.set(filePath, watchEntry);
 			watchedRevisions.set(resolvedPath, watchEntry);
+			watchedRevisions.set(canonicalFilePath, watchEntry);
 
 			self.postMessage(
 				createSuccessResponse(msg.id, {
-					clones,
+					clones: fileClones,
 					isComplete: isBaselineComplete,
 				}),
 			);
