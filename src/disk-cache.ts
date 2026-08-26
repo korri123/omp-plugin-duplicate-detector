@@ -21,7 +21,7 @@ import {
 import type { WorkspaceOptions } from "./worker-protocol";
 
 const DEFAULT_MAX_CACHE_BYTES = 250 * 1024 * 1024; // 250 MB
-export const TOKENIZER_CACHE_VERSION = "4.0";
+const TOKENIZER_CACHE_VERSION = "4.0";
 
 export interface DiskCacheOptions {
 	/** Root directory of the workspace */
@@ -389,6 +389,7 @@ export class DiskCacheManager {
 	#getStmt: Statement | null = null;
 	#saveStmt: Statement | null = null;
 	#deleteStmt: Statement | null = null;
+	#deleteByRelPathStmt: Statement | null = null;
 	#totalSizeStmt: Statement | null = null;
 	#oldestShardsStmt: Statement | null = null;
 	#deleteAllStmt: Statement | null = null;
@@ -472,6 +473,9 @@ export class DiskCacheManager {
 			`);
 			this.#deleteStmt = db.prepare(
 				"DELETE FROM shards WHERE rel_path = ?1 AND content_hash = ?2",
+			);
+			this.#deleteByRelPathStmt = db.prepare(
+				"DELETE FROM shards WHERE rel_path = ?1",
 			);
 			this.#totalSizeStmt = db.prepare(
 				"SELECT COALESCE(SUM(LENGTH(payload)), 0) as total FROM shards",
@@ -583,6 +587,19 @@ export class DiskCacheManager {
 			if (!db || !this.#deleteStmt) return;
 			const normalizedRelPath = relPath.replace(/\\/g, "/");
 			this.#deleteStmt.run(normalizedRelPath, contentHash);
+		} catch {
+			// Fail open
+		}
+	}
+	/**
+	 * Deletes all cached shards for a given relPath regardless of contentHash.
+	 */
+	async deleteByRelPath(relPath: string): Promise<void> {
+		try {
+			const db = this.#getDb();
+			if (!db || !this.#deleteByRelPathStmt) return;
+			const normalizedRelPath = relPath.replace(/\\/g, "/");
+			this.#deleteByRelPathStmt.run(normalizedRelPath);
 		} catch {
 			// Fail open
 		}
@@ -721,6 +738,7 @@ export class DiskCacheManager {
 			this.#getStmt = null;
 			this.#saveStmt = null;
 			this.#deleteStmt = null;
+			this.#deleteByRelPathStmt = null;
 			this.#totalSizeStmt = null;
 			this.#oldestShardsStmt = null;
 			this.#deleteAllStmt = null;

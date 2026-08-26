@@ -971,6 +971,7 @@ var require_ignore = __commonJS(function(exports, module) {
 
 // src/detector-worker.ts
 import * as crypto3 from "crypto";
+import * as fsSync3 from "fs";
 import * as fs3 from "fs/promises";
 import * as path5 from "path";
 
@@ -13074,6 +13075,7 @@ class DiskCacheManager {
   #getStmt = null;
   #saveStmt = null;
   #deleteStmt = null;
+  #deleteByRelPathStmt = null;
   #totalSizeStmt = null;
   #oldestShardsStmt = null;
   #deleteAllStmt = null;
@@ -13135,6 +13137,7 @@ class DiskCacheManager {
 					mtime = excluded.mtime
 			`);
       this.#deleteStmt = db.prepare("DELETE FROM shards WHERE rel_path = ?1 AND content_hash = ?2");
+      this.#deleteByRelPathStmt = db.prepare("DELETE FROM shards WHERE rel_path = ?1");
       this.#totalSizeStmt = db.prepare("SELECT COALESCE(SUM(LENGTH(payload)), 0) as total FROM shards");
       this.#oldestShardsStmt = db.prepare("SELECT rowid, LENGTH(payload) as size FROM shards ORDER BY mtime ASC LIMIT ?1");
       this.#deleteAllStmt = db.prepare("DELETE FROM shards");
@@ -13187,6 +13190,15 @@ class DiskCacheManager {
         return;
       const normalizedRelPath = relPath.replace(/\\/g, "/");
       this.#deleteStmt.run(normalizedRelPath, contentHash);
+    } catch {}
+  }
+  async deleteByRelPath(relPath) {
+    try {
+      const db = this.#getDb();
+      if (!db || !this.#deleteByRelPathStmt)
+        return;
+      const normalizedRelPath = relPath.replace(/\\/g, "/");
+      this.#deleteByRelPathStmt.run(normalizedRelPath);
     } catch {}
   }
   async saveShards(items) {
@@ -13273,6 +13285,7 @@ class DiskCacheManager {
       this.#getStmt = null;
       this.#saveStmt = null;
       this.#deleteStmt = null;
+      this.#deleteByRelPathStmt = null;
       this.#totalSizeStmt = null;
       this.#oldestShardsStmt = null;
       this.#deleteAllStmt = null;
@@ -13302,11 +13315,18 @@ import * as fs2 from "fs/promises";
 import * as path4 from "path";
 function canonicalizePath(targetPath) {
   const resolved = path4.resolve(targetPath);
-  try {
-    if (fsSync2.existsSync(resolved)) {
-      return fsSync2.realpathSync(resolved);
-    }
-  } catch {}
+  let current = resolved;
+  let suffix = "";
+  while (current && current !== path4.dirname(current)) {
+    try {
+      if (fsSync2.existsSync(current)) {
+        const real = fsSync2.realpathSync(current);
+        return suffix ? path4.join(real, suffix) : real;
+      }
+    } catch {}
+    suffix = suffix ? path4.join(path4.basename(current), suffix) : path4.basename(current);
+    current = path4.dirname(current);
+  }
   return resolved;
 }
 function isOmpWorktreePath(targetPath) {
@@ -13480,6 +13500,56 @@ function areOptionsEqual(a, b) {
   const aFormats = a.formatsExts ? JSON.stringify(a.formatsExts) : "";
   const bFormats = b.formatsExts ? JSON.stringify(b.formatsExts) : "";
   return aFormats === bFormats;
+}
+function filterAndEvictStaleClones(clones, activeFilePath) {
+  if (!currentRootDir || !fsSync3.existsSync(currentRootDir)) {
+    return clones;
+  }
+  const validClones = [];
+  const evictedSources = new Set;
+  const activeRes = activeFilePath ? path5.resolve(activeFilePath) : null;
+  const activeCan = activeFilePath ? canonicalizePath(activeFilePath) : null;
+  const isActive = (src) => {
+    if (!activeFilePath)
+      return false;
+    if (src === activeFilePath)
+      return true;
+    if (activeRes && path5.resolve(src) === activeRes)
+      return true;
+    if (activeCan && canonicalizePath(src) === activeCan)
+      return true;
+    return false;
+  };
+  const isStaleSource = (src) => {
+    if (isActive(src))
+      return false;
+    if (evictedSources.has(src))
+      return true;
+    const can = canonicalizePath(path5.isAbsolute(src) ? src : path5.resolve(currentRootDir, src));
+    const rel = path5.relative(currentRootDir, can);
+    const isInside = !rel.startsWith("..") && !path5.isAbsolute(rel);
+    if (isInside && !fsSync3.existsSync(can)) {
+      evictedSources.add(src);
+      currentIndex.removeSource(src);
+      watchedRevisions.delete(src);
+      watchedRevisions.delete(can);
+      watchedRevisions.delete(path5.resolve(src));
+      if (currentDiskCache) {
+        currentDiskCache.deleteByRelPath(rel).catch(() => {});
+      }
+      return true;
+    }
+    return false;
+  };
+  for (const clone2 of clones) {
+    const srcA = clone2.duplicationA.sourceId;
+    const srcB = clone2.duplicationB.sourceId;
+    if (isStaleSource(srcA) || isStaleSource(srcB)) {
+      continue;
+    }
+    validClones.push(clone2);
+  }
+  return validClones;
 }
 function notifyLateFindings(clones) {
   for (const clone2 of clones) {
@@ -13888,16 +13958,18 @@ async function handleWorkerRequest(msg) {
     }
     case "checkSnippet": {
       const { filePath, content, format } = msg.payload;
-      const clones = currentIndex.checkSnippet(filePath, content, format);
+      const rawClones = currentIndex.checkSnippet(filePath, content, format);
+      const clones = filterAndEvictStaleClones(rawClones, filePath);
       self.postMessage(createSuccessResponse(msg.id, clones));
       break;
     }
     case "checkAndUpdate": {
       const { filePath, content, format, revision = 1 } = msg.payload;
-      const clones = currentIndex.updateSource(filePath, content, format);
+      const rawClones = currentIndex.updateSource(filePath, content, format);
       const canonicalFilePath = canonicalizePath(filePath);
       const resolvedPath = path5.resolve(filePath);
       cacheSourceShard(filePath, content);
+      const clones = filterAndEvictStaleClones(rawClones, filePath);
       const fileClones = clones.filter((c) => c.duplicationA.sourceId === filePath || c.duplicationB.sourceId === filePath || path5.resolve(c.duplicationA.sourceId) === resolvedPath || path5.resolve(c.duplicationB.sourceId) === resolvedPath || canonicalizePath(c.duplicationA.sourceId) === canonicalFilePath || canonicalizePath(c.duplicationB.sourceId) === canonicalFilePath);
       const watchEntry = {
         revision,
@@ -13914,14 +13986,19 @@ async function handleWorkerRequest(msg) {
     }
     case "updateFile": {
       const { filePath, content, format } = msg.payload;
-      const clones = currentIndex.updateSource(filePath, content, format);
+      const rawClones = currentIndex.updateSource(filePath, content, format);
       cacheSourceShard(filePath, content);
+      const clones = filterAndEvictStaleClones(rawClones, filePath);
       self.postMessage(createSuccessResponse(msg.id, { clones }));
       break;
     }
     case "removeFile": {
       const { filePath } = msg.payload;
       currentIndex.removeSource(filePath);
+      if (currentDiskCache) {
+        const relPath = path5.isAbsolute(filePath) && currentRootDir ? path5.relative(currentRootDir, filePath) : filePath;
+        currentDiskCache.deleteByRelPath(relPath).catch(() => {});
+      }
       self.postMessage(createSuccessResponse(msg.id, { removed: true }));
       break;
     }
@@ -13937,6 +14014,10 @@ async function handleWorkerRequest(msg) {
           } else {
             if (!getSupportedCodeFormat(fileEntry.filePath, currentOptions?.formatsExts)) {
               currentIndex.removeSource(fileEntry.filePath);
+              if (currentDiskCache) {
+                const relPath = path5.isAbsolute(fileEntry.filePath) && currentRootDir ? path5.relative(currentRootDir, fileEntry.filePath) : fileEntry.filePath;
+                currentDiskCache.deleteByRelPath(relPath).catch(() => {});
+              }
               continue;
             }
             const stat2 = await fs3.stat(fileEntry.filePath);
@@ -13951,6 +14032,10 @@ async function handleWorkerRequest(msg) {
           }
         } catch {
           currentIndex.removeSource(fileEntry.filePath);
+          if (currentDiskCache) {
+            const relPath = path5.isAbsolute(fileEntry.filePath) && currentRootDir ? path5.relative(currentRootDir, fileEntry.filePath) : fileEntry.filePath;
+            currentDiskCache.deleteByRelPath(relPath).catch(() => {});
+          }
         }
       }
       self.postMessage(createSuccessResponse(msg.id, { reconciledCount }));
@@ -13999,7 +14084,7 @@ async function handleWorkerRequest(msg) {
           clones = currentIndex.getClones();
         }
       } else {
-        clones = currentIndex.getClones();
+        clones = filterAndEvictStaleClones(currentIndex.getClones());
       }
       self.postMessage(createSuccessResponse(msg.id, clones));
       break;

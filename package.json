@@ -1,6 +1,6 @@
 {
 	"name": "omp-plugin-duplicate-detector",
-	"version": "0.2.0",
+	"version": "0.2.1",
 	"description": "Code clone and duplication detector plugin for oh-my-pi powered by jscpd",
 	"type": "module",
 	"files": [

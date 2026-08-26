@@ -421,6 +421,32 @@ export function formatCurrency(amount: number, currency = "USD"): string {
 			expect(result).toBeNull();
 			cacheManager.close();
 		});
+
+		it("deletes cached shards by relative path via deleteByRelPath", async () => {
+			const cacheManager = new DiskCacheManager({
+				rootDir: workspaceDir,
+				cacheDir: cacheBaseDir,
+			});
+
+			const shard: SerializedSourceShard = {
+				version: CACHE_FORMAT_VERSION,
+				sourceId: "src/to-delete.ts",
+				contentHash: "hash123",
+				format: "typescript",
+				size: 100,
+				lines: 10,
+				tokenCount: 20,
+				frames: [],
+			};
+			await cacheManager.saveShard(shard, "src/to-delete.ts");
+			const before = await cacheManager.getShard("src/to-delete.ts", "hash123");
+			expect(before).not.toBeNull();
+
+			await cacheManager.deleteByRelPath("src/to-delete.ts");
+			const after = await cacheManager.getShard("src/to-delete.ts", "hash123");
+			expect(after).toBeNull();
+			cacheManager.close();
+		});
 	});
 
 	describe("DiskCacheManager: LRU Byte-Budget Pruning", () => {

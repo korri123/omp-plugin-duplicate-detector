@@ -26,12 +26,21 @@ export interface RepositoryContext {
  */
 export function canonicalizePath(targetPath: string): string {
 	const resolved = path.resolve(targetPath);
-	try {
-		if (fsSync.existsSync(resolved)) {
-			return fsSync.realpathSync(resolved);
+	let current = resolved;
+	let suffix = "";
+	while (current && current !== path.dirname(current)) {
+		try {
+			if (fsSync.existsSync(current)) {
+				const real = fsSync.realpathSync(current);
+				return suffix ? path.join(real, suffix) : real;
+			}
+		} catch {
+			// Fall back to walking up
 		}
-	} catch {
-		// Fall back to resolved
+		suffix = suffix
+			? path.join(path.basename(current), suffix)
+			: path.basename(current);
+		current = path.dirname(current);
 	}
 	return resolved;
 }

@@ -5,6 +5,7 @@
  */
 
 import * as crypto from "node:crypto";
+import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { IClone } from "@jscpd/core";
@@ -88,6 +89,70 @@ function areOptionsEqual(a?: WorkspaceOptions, b?: WorkspaceOptions): boolean {
 	const bFormats = b.formatsExts ? JSON.stringify(b.formatsExts) : "";
 	return aFormats === bFormats;
 }
+/**
+ * Verifies that source files involved in detected clones exist on disk.
+ * If an indexed repository source has been deleted or moved, it is evicted from currentIndex,
+ * disk cache, and watchedRevisions, and the stale clone is filtered out.
+ *
+ * activeFilePath: the file currently being queried or updated in memory (exempt from disk check).
+ */
+function filterAndEvictStaleClones(
+	clones: IClone[],
+	activeFilePath?: string,
+): IClone[] {
+	if (!currentRootDir || !fsSync.existsSync(currentRootDir)) {
+		return clones;
+	}
+
+	const validClones: IClone[] = [];
+	const evictedSources = new Set<string>();
+	const activeRes = activeFilePath ? path.resolve(activeFilePath) : null;
+	const activeCan = activeFilePath ? canonicalizePath(activeFilePath) : null;
+
+	const isActive = (src: string): boolean => {
+		if (!activeFilePath) return false;
+		if (src === activeFilePath) return true;
+		if (activeRes && path.resolve(src) === activeRes) return true;
+		if (activeCan && canonicalizePath(src) === activeCan) return true;
+		return false;
+	};
+
+	const isStaleSource = (src: string): boolean => {
+		if (isActive(src)) return false;
+		if (evictedSources.has(src)) return true;
+
+		const can = canonicalizePath(
+			path.isAbsolute(src) ? src : path.resolve(currentRootDir, src),
+		);
+		const rel = path.relative(currentRootDir, can);
+		const isInside = !rel.startsWith("..") && !path.isAbsolute(rel);
+		if (isInside && !fsSync.existsSync(can)) {
+			evictedSources.add(src);
+			currentIndex.removeSource(src);
+			watchedRevisions.delete(src);
+			watchedRevisions.delete(can);
+			watchedRevisions.delete(path.resolve(src));
+			if (currentDiskCache) {
+				currentDiskCache.deleteByRelPath(rel).catch(() => {});
+			}
+			return true;
+		}
+		return false;
+	};
+
+	for (const clone of clones) {
+		const srcA = clone.duplicationA.sourceId;
+		const srcB = clone.duplicationB.sourceId;
+
+		if (isStaleSource(srcA) || isStaleSource(srcB)) {
+			continue;
+		}
+
+		validClones.push(clone);
+	}
+
+	return validClones;
+}
 function notifyLateFindings(clones: IClone[]): void {
 	for (const clone of clones) {
 		const srcA = clone.duplicationA.sourceId;
@@ -96,7 +161,6 @@ function notifyLateFindings(clones: IClone[]): void {
 		const resB = path.resolve(srcB);
 		const canA = canonicalizePath(srcA);
 		const canB = canonicalizePath(srcB);
-
 		const isWatchedA =
 			watchedRevisions.has(srcA) ||
 			watchedRevisions.has(resA) ||
@@ -659,18 +723,21 @@ async function handleWorkerRequest(msg: WorkerRequestMessage): Promise<void> {
 
 		case "checkSnippet": {
 			const { filePath, content, format } = msg.payload;
-			const clones = currentIndex.checkSnippet(filePath, content, format);
+			const rawClones = currentIndex.checkSnippet(filePath, content, format);
+			const clones = filterAndEvictStaleClones(rawClones, filePath);
 			self.postMessage(createSuccessResponse(msg.id, clones));
 			break;
 		}
 
 		case "checkAndUpdate": {
 			const { filePath, content, format, revision = 1 } = msg.payload;
-			const clones = currentIndex.updateSource(filePath, content, format);
+			const rawClones = currentIndex.updateSource(filePath, content, format);
 			const canonicalFilePath = canonicalizePath(filePath);
 			const resolvedPath = path.resolve(filePath);
 
 			cacheSourceShard(filePath, content);
+
+			const clones = filterAndEvictStaleClones(rawClones, filePath);
 
 			const fileClones = clones.filter(
 				(c) =>
@@ -701,8 +768,9 @@ async function handleWorkerRequest(msg: WorkerRequestMessage): Promise<void> {
 
 		case "updateFile": {
 			const { filePath, content, format } = msg.payload;
-			const clones = currentIndex.updateSource(filePath, content, format);
+			const rawClones = currentIndex.updateSource(filePath, content, format);
 			cacheSourceShard(filePath, content);
+			const clones = filterAndEvictStaleClones(rawClones, filePath);
 			self.postMessage(createSuccessResponse(msg.id, { clones }));
 			break;
 		}
@@ -710,6 +778,13 @@ async function handleWorkerRequest(msg: WorkerRequestMessage): Promise<void> {
 		case "removeFile": {
 			const { filePath } = msg.payload;
 			currentIndex.removeSource(filePath);
+			if (currentDiskCache) {
+				const relPath =
+					path.isAbsolute(filePath) && currentRootDir
+						? path.relative(currentRootDir, filePath)
+						: filePath;
+				currentDiskCache.deleteByRelPath(relPath).catch(() => {});
+			}
 			self.postMessage(createSuccessResponse(msg.id, { removed: true }));
 			break;
 		}
@@ -732,6 +807,13 @@ async function handleWorkerRequest(msg: WorkerRequestMessage): Promise<void> {
 							)
 						) {
 							currentIndex.removeSource(fileEntry.filePath);
+							if (currentDiskCache) {
+								const relPath =
+									path.isAbsolute(fileEntry.filePath) && currentRootDir
+										? path.relative(currentRootDir, fileEntry.filePath)
+										: fileEntry.filePath;
+								currentDiskCache.deleteByRelPath(relPath).catch(() => {});
+							}
 							continue;
 						}
 						const stat = await fs.stat(fileEntry.filePath);
@@ -745,8 +827,15 @@ async function handleWorkerRequest(msg: WorkerRequestMessage): Promise<void> {
 						}
 					}
 				} catch {
-					// If file cannot be read or no longer exists, remove from index
+					// If file cannot be read or no longer exists, remove from index and disk cache
 					currentIndex.removeSource(fileEntry.filePath);
+					if (currentDiskCache) {
+						const relPath =
+							path.isAbsolute(fileEntry.filePath) && currentRootDir
+								? path.relative(currentRootDir, fileEntry.filePath)
+								: fileEntry.filePath;
+						currentDiskCache.deleteByRelPath(relPath).catch(() => {});
+					}
 				}
 			}
 
@@ -803,7 +892,7 @@ async function handleWorkerRequest(msg: WorkerRequestMessage): Promise<void> {
 					clones = currentIndex.getClones();
 				}
 			} else {
-				clones = currentIndex.getClones();
+				clones = filterAndEvictStaleClones(currentIndex.getClones());
 			}
 
 			self.postMessage(createSuccessResponse(msg.id, clones));

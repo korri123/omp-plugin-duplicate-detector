@@ -1,4 +1,6 @@
 import { describe, expect, it } from "bun:test";
+import * as fsPromises from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
 import { DuplicateDetectorCoordinator } from "../src/coordinator";
 
@@ -221,5 +223,67 @@ export function calculateTaxAmount(income: number, deduction: number, rate: numb
 		const stdout = await new Response(proc.stdout).text();
 		expect(exitCode).toBe(0);
 		expect(stdout).toContain("FACTORY_INITIALIZED");
+	});
+
+	it("lazily evicts deleted on-disk files when checking new clones", async () => {
+		const tempDir = await fsPromises.mkdtemp(
+			path.join(os.tmpdir(), "dup-detector-test-"),
+		);
+
+		try {
+			const coordinator = new DuplicateDetectorCoordinator();
+			await coordinator.openWorkspace(tempDir, {
+				minLines: 3,
+				minTokens: 10,
+			});
+
+			const sampleCode = `
+export function duplicateAlgorithm(a: number, b: number): number {
+    const step1 = a * 2 + b * 3;
+    const step2 = step1 / (a + b + 1);
+    const step3 = step2 * 100;
+    return Math.round(step3);
+}
+`;
+
+			const fileAPath = path.join(tempDir, "fileA.ts");
+			const fileBPath = path.join(tempDir, "fileB.ts");
+
+			// Write fileA to disk and update coordinator
+			await fsPromises.writeFile(fileAPath, sampleCode, "utf8");
+			await coordinator.checkAndUpdate(fileAPath, sampleCode);
+
+			// Check fileB snippet while fileA is on disk -> clone detected!
+			const clonesBefore = await coordinator.checkSnippet(
+				fileBPath,
+				sampleCode,
+			);
+			expect(clonesBefore.length).toBeGreaterThan(0);
+			expect(clonesBefore[0]!.duplicationB.sourceId).toBe(fileAPath);
+
+			// Delete fileA from disk (simulating \`mv\` or \`rm\` in shell)
+			await fsPromises.unlink(fileAPath);
+			// Write fileB to disk
+			await fsPromises.writeFile(fileBPath, sampleCode, "utf8");
+
+			// Check fileB now -> fileA is lazily evicted, 0 clones returned!
+			const clonesAfter = await coordinator.checkAndUpdate(
+				fileBPath,
+				sampleCode,
+			);
+			expect(clonesAfter.clones.length).toBe(0);
+			// Subsequent check of fileB snippet also yields 0 clones
+			const snippetCheck = await coordinator.checkSnippet(
+				path.join(tempDir, "fileC.ts"),
+				sampleCode,
+			);
+			// Only fileB exists in index now, checking fileC against fileB detects fileB as source
+			expect(snippetCheck.length).toBeGreaterThan(0);
+			expect(snippetCheck[0]!.duplicationB.sourceId).toBe(fileBPath);
+
+			await coordinator.dispose();
+		} finally {
+			await fsPromises.rm(tempDir, { recursive: true, force: true });
+		}
 	});
 });

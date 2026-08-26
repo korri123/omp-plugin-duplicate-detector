@@ -735,4 +735,83 @@ export function calculateShippingQuote(weight: number, distance: number, express
 			"Ready (2 Git files indexed, cached)",
 		);
 	});
+
+	it("does not emit duplicate warnings for moved or deleted untracked files", async () => {
+		const harness = createMockHarness();
+		duplicateDetectorExtension(harness.api);
+		const sessionCtx = await harness.startSession(tempDir, {
+			minLines: 3,
+			minTokens: 10,
+			reminderMode: "steer",
+		});
+
+		const code = `
+export function complexGeometryRender(scale: number, offset: number): number[] {
+    const a = scale * 10 + offset;
+    const b = a * 2 + offset * 3;
+    const c = b - scale + 100;
+    return [a, b, c, a + b + c];
+}
+`;
+
+		const oldRelPath = "crates/vectoria-core/examples/render_shapes.rs";
+		const newRelPath = "crates/render/examples/render_shapes.rs";
+		const oldFullPath = path.join(tempDir, oldRelPath);
+		const newFullPath = path.join(tempDir, newRelPath);
+
+		await fs.mkdir(path.dirname(oldFullPath), { recursive: true });
+		await fs.writeFile(oldFullPath, code, "utf8");
+
+		const toolResultHandlers = harness.eventHandlers["tool_result"] || [];
+		expect(toolResultHandlers.length).toBeGreaterThan(0);
+
+		// 1. Tool result write for old path
+		await toolResultHandlers[0]!(
+			{
+				type: "tool_result",
+				toolName: "write",
+				input: { path: oldRelPath },
+				content: "Successfully written",
+				isError: false,
+			},
+			sessionCtx,
+		);
+
+		// 2. Move file on disk and delete old directory (simulating bash `mv`)
+		await fs.mkdir(path.dirname(newFullPath), { recursive: true });
+		await fs.rename(oldFullPath, newFullPath);
+		await fs.rm(path.dirname(oldFullPath), { recursive: true, force: true });
+
+		// Bash tool execution triggers parent git reconciliation
+		await toolResultHandlers[0]!(
+			{
+				type: "tool_result",
+				toolName: "bash",
+				input: { command: "mv crates/vectoria-core crates/render" },
+				content: "",
+				isError: false,
+			},
+			sessionCtx,
+		);
+
+		// Clear any previous messages
+		harness.sentMessages.length = 0;
+
+		// 3. Tool result write for new path
+		await toolResultHandlers[0]!(
+			{
+				type: "tool_result",
+				toolName: "write",
+				input: { path: newRelPath },
+				content: "Successfully written",
+				isError: false,
+			},
+			sessionCtx,
+		);
+		// Verify NO duplicate warning messages were sent against the deleted old path
+		const dupWarnings = harness.sentMessages.filter(
+			(m) => m.msg.customType === "duplicate-detector-warning",
+		);
+		expect(dupWarnings.length).toBe(0);
+	});
 });

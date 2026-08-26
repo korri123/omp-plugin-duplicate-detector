@@ -394,7 +394,7 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 				}
 			}
 			const { stdout: statusOut } = await execGit(
-				["status", "--porcelain", "-z", "--untracked-files=no", "--", "."],
+				["status", "--porcelain", "-z", "-uall", "--", "."],
 				cwd,
 			).catch(() => ({ stdout: "" }));
 
