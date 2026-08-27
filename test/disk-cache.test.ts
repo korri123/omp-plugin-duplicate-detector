@@ -349,6 +349,81 @@ export function formatCurrency(amount: number, currency = "USD"): string {
 			cacheManager.close();
 		});
 
+		it("preserves exact token character range offsets after SQLite serialization and retrieval", async () => {
+			const cacheManager = new DiskCacheManager({
+				rootDir: workspaceDir,
+				cacheDir: cacheBaseDir,
+				config: { minTokens: 10, minLines: 3 },
+			});
+
+			const index = new SourceAwareCloneIndex({ minTokens: 10, minLines: 3 });
+			const relPath = "src/ranges.ts";
+			const fullPath = path.join(workspaceDir, relPath);
+			const codeWithSpaces = `
+import { format } from 'util';
+
+export function calculateTax(amount: number, rate: number): number {
+    // Indented comment with extra spaces
+    const subtotal = amount * (1 + rate);
+    const fee = 10;
+    return subtotal + fee;
+}
+`;
+			const contentHash = crypto
+				.createHash("sha256")
+				.update(codeWithSpaces)
+				.digest("hex");
+
+			index.addSource(fullPath, codeWithSpaces);
+			const originalShard = index.exportSourceShard(fullPath, contentHash)!;
+
+			await cacheManager.saveShard(originalShard, relPath);
+			const retrievedShard = await cacheManager.getShard(relPath, contentHash);
+
+			expect(retrievedShard).not.toBeNull();
+			expect(retrievedShard?.tokens).toBeDefined();
+			expect(originalShard.tokens).toBeDefined();
+			const origTokens = originalShard.tokens!;
+			const retrTokens = retrievedShard!.tokens!;
+			expect(retrTokens.length).toBe(origTokens.length);
+
+			for (let i = 0; i < origTokens.length; i++) {
+				const orig = origTokens[i]!;
+				const retr = retrTokens[i]!;
+				expect(retr.line).toBe(orig.line);
+				expect(retr.column).toBe(orig.column);
+				expect(retr.range[0]).toBe(orig.range[0]);
+				expect(retr.range[1]).toBe(orig.range[1]);
+			}
+
+			// Verify clone coalescence when checking a duplicate snippet against cached shard
+			const cachedIndex = new SourceAwareCloneIndex({
+				minTokens: 10,
+				minLines: 3,
+			});
+			cachedIndex.hydrateSourceShard(retrievedShard!);
+
+			const freshClones = index.checkSnippet(
+				"src/ranges_copy.ts",
+				codeWithSpaces,
+			);
+			const cachedClones = cachedIndex.checkSnippet(
+				"src/ranges_copy.ts",
+				codeWithSpaces,
+			);
+
+			expect(cachedClones.length).toBe(freshClones.length);
+			expect(cachedClones.length).toBe(1);
+			expect(cachedClones[0]!.duplicationA.start.line).toBe(
+				freshClones[0]!.duplicationA.start.line,
+			);
+			expect(cachedClones[0]!.duplicationA.end.line).toBe(
+				freshClones[0]!.duplicationA.end.line,
+			);
+
+			cacheManager.close();
+		});
+
 		it("fails open and returns null for non-existent shard", async () => {
 			const cacheManager = new DiskCacheManager({
 				rootDir: workspaceDir,

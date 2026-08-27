@@ -43,9 +43,11 @@ export class DuplicateLedger {
 
 		for (const clone of clones) {
 			const id = cloneIdentity(clone);
-			currentIdentities.add(id);
-			if (!previous?.has(id)) {
-				fresh.push(clone);
+			if (!currentIdentities.has(id)) {
+				currentIdentities.add(id);
+				if (!previous?.has(id)) {
+					fresh.push(clone);
+				}
 			}
 		}
 

@@ -12838,7 +12838,7 @@ class SourceAwareCloneIndex {
 
 // src/disk-cache.ts
 var DEFAULT_MAX_CACHE_BYTES = 250 * 1024 * 1024;
-var TOKENIZER_CACHE_VERSION = "4.0";
+var TOKENIZER_CACHE_VERSION = "5.0";
 function getDefaultCacheDir() {
   if (process.platform === "win32") {
     const localAppData = process.env.LOCALAPPDATA;
@@ -12879,7 +12879,7 @@ function computeWorkspaceCachePath(baseDir, repositoryKeyOrRootDir, configFinger
   return path3.join(baseDir, `${repoKey}_${configFingerprint}_v${CACHE_FORMAT_VERSION}.sqlite`);
 }
 var CACHE_FORMAT_MAGIC = "DUP3";
-var CACHE_FORMAT_VERSION = 4;
+var CACHE_FORMAT_VERSION = 5;
 function packBinaryShard(shard) {
   return packBinaryShardV3(shard, shard.tokens ?? []);
 }
@@ -12913,20 +12913,22 @@ function packBinaryShardV3(shard, tokens) {
   const dLenBuf = Buffer.allocUnsafe(colBytes);
   let prevLine = 0;
   let prevCol = 0;
-  let prevPos = 0;
+  let prevRangeStart = 0;
   for (let i = 0;i < tokenCount; i++) {
     const tok = tokens[i];
     const dLine = tok.line - prevLine;
     const dCol = tok.column - prevCol;
-    const dPos = tok.position - prevPos;
-    const len = Array.isArray(tok.range) && tok.range.length >= 2 ? tok.range[1] - tok.range[0] : 0;
+    const startRange = Array.isArray(tok.range) && tok.range.length >= 2 ? tok.range[0] : tok.position ?? i;
+    const endRange = Array.isArray(tok.range) && tok.range.length >= 2 ? tok.range[1] : startRange;
+    const len = Math.max(0, endRange - startRange);
+    const dRangeStart = startRange - prevRangeStart;
     dLinesBuf.writeInt32LE(dLine, i * 4);
     dColsBuf.writeInt32LE(dCol, i * 4);
-    dPosBuf.writeInt32LE(dPos, i * 4);
+    dPosBuf.writeInt32LE(dRangeStart, i * 4);
     dLenBuf.writeUInt32LE(len, i * 4);
     prevLine = tok.line;
     prevCol = tok.column;
-    prevPos = tok.position;
+    prevRangeStart = startRange;
   }
   const meta = {
     sourceId: shard.sourceId,
@@ -12975,7 +12977,7 @@ function unpackBinaryShard(compressed) {
 function unpackBinaryShardV3(buf) {
   try {
     const version = buf.readUInt16LE(4);
-    if (version < 3 || version > CACHE_FORMAT_VERSION)
+    if (version !== CACHE_FORMAT_VERSION)
       return null;
     const metaLen = buf.readUInt16LE(6);
     const tokenCount = buf.readUInt32LE(8);
@@ -13027,11 +13029,11 @@ function unpackBinaryShardV3(buf) {
     const tokens = new Array(tokenCount);
     let curLine = 0;
     let curCol = 0;
-    let curPos = 0;
+    let curRangeStart = 0;
     for (let i = 0;i < tokenCount; i++) {
       curLine += dLines[i];
       curCol += dCols[i];
-      curPos += dPos[i];
+      curRangeStart += dPos[i];
       const len = dLens[i];
       const dictIdx = indices[i];
       const hash2 = dictionary[dictIdx] ?? "";
@@ -13039,8 +13041,8 @@ function unpackBinaryShardV3(buf) {
         hash: hash2,
         line: curLine,
         column: curCol,
-        position: curPos,
-        range: [curPos, curPos + len]
+        position: i,
+        range: [curRangeStart, curRangeStart + len]
       };
     }
     const minTokens = meta.minTokens ?? 40;

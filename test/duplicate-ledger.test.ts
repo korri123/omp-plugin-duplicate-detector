@@ -42,6 +42,22 @@ describe("DuplicateLedger", () => {
 		expect(thirdPass.length).toBe(1);
 	});
 
+	it("deduplicates identical clones occurring within the same batch", () => {
+		const ledger = new DuplicateLedger();
+
+		// Pass identical clone instances in the same batch
+		const batch = [
+			mockCloneA,
+			mockCloneA,
+			{ ...mockCloneA },
+			{ ...mockCloneA },
+		];
+		const fresh = ledger.filterFreshClones("src/auth.ts", batch);
+
+		// Should only return 1 instance
+		expect(fresh.length).toBe(1);
+	});
+
 	it("formats an XML in-band system reminder block with line ranges", () => {
 		const ledger = new DuplicateLedger();
 		const reminder = ledger.formatReminder([mockCloneA], "src/auth.ts");

@@ -21,7 +21,7 @@ import {
 import type { WorkspaceOptions } from "./worker-protocol";
 
 const DEFAULT_MAX_CACHE_BYTES = 250 * 1024 * 1024; // 250 MB
-const TOKENIZER_CACHE_VERSION = "4.0";
+const TOKENIZER_CACHE_VERSION = "5.0";
 
 export interface DiskCacheOptions {
 	/** Root directory of the workspace */
@@ -136,7 +136,7 @@ export function computeShardKey(
 export const CACHE_FORMAT_MAGIC = "DUP3";
 
 /** Current binary format & SQLite schema version */
-export const CACHE_FORMAT_VERSION = 4;
+export const CACHE_FORMAT_VERSION = 5;
 
 /**
  * Encodes a SerializedSourceShard into a high-density, zlib-compressed binary buffer (DUP3 format).
@@ -187,26 +187,31 @@ function packBinaryShardV3(
 
 	let prevLine = 0;
 	let prevCol = 0;
-	let prevPos = 0;
+	let prevRangeStart = 0;
 
 	for (let i = 0; i < tokenCount; i++) {
 		const tok = tokens[i]!;
 		const dLine = tok.line - prevLine;
 		const dCol = tok.column - prevCol;
-		const dPos = tok.position - prevPos;
-		const len =
+		const startRange =
 			Array.isArray(tok.range) && tok.range.length >= 2
-				? tok.range[1] - tok.range[0]
-				: 0;
+				? tok.range[0]
+				: (tok.position ?? i);
+		const endRange =
+			Array.isArray(tok.range) && tok.range.length >= 2
+				? tok.range[1]
+				: startRange;
+		const len = Math.max(0, endRange - startRange);
+		const dRangeStart = startRange - prevRangeStart;
 
 		dLinesBuf.writeInt32LE(dLine, i * 4);
 		dColsBuf.writeInt32LE(dCol, i * 4);
-		dPosBuf.writeInt32LE(dPos, i * 4);
+		dPosBuf.writeInt32LE(dRangeStart, i * 4);
 		dLenBuf.writeUInt32LE(len, i * 4);
 
 		prevLine = tok.line;
 		prevCol = tok.column;
-		prevPos = tok.position;
+		prevRangeStart = startRange;
 	}
 
 	const meta = {
@@ -267,7 +272,7 @@ export function unpackBinaryShard(
 function unpackBinaryShardV3(buf: Buffer): SerializedSourceShard | null {
 	try {
 		const version = buf.readUInt16LE(4);
-		if (version < 3 || version > CACHE_FORMAT_VERSION) return null;
+		if (version !== CACHE_FORMAT_VERSION) return null;
 
 		const metaLen = buf.readUInt16LE(6);
 		const tokenCount = buf.readUInt32LE(8);
@@ -329,12 +334,12 @@ function unpackBinaryShardV3(buf: Buffer): SerializedSourceShard | null {
 		const tokens: SerializedToken[] = new Array(tokenCount);
 		let curLine = 0;
 		let curCol = 0;
-		let curPos = 0;
+		let curRangeStart = 0;
 
 		for (let i = 0; i < tokenCount; i++) {
 			curLine += dLines[i]!;
 			curCol += dCols[i]!;
-			curPos += dPos[i]!;
+			curRangeStart += dPos[i]!;
 			const len = dLens[i]!;
 			const dictIdx = indices[i]!;
 			const hash = dictionary[dictIdx] ?? "";
@@ -343,8 +348,8 @@ function unpackBinaryShardV3(buf: Buffer): SerializedSourceShard | null {
 				hash,
 				line: curLine,
 				column: curCol,
-				position: curPos,
-				range: [curPos, curPos + len],
+				position: i,
+				range: [curRangeStart, curRangeStart + len],
 			};
 		}
 
