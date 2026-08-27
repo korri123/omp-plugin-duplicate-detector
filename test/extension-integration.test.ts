@@ -703,6 +703,7 @@ export function calculateShippingQuote(weight: number, distance: number, express
 		expect(statusMsg?.msg.content).toContain(
 			"Ready (2 Git files indexed, uncached)",
 		);
+		expect(statusMsg?.msg.display).toBe(false);
 		expect(statusMsg?.opts?.triggerTurn).toBe(false);
 	});
 
@@ -734,6 +735,7 @@ export function calculateShippingQuote(weight: number, distance: number, express
 		expect(statusMsg?.msg.content).toContain(
 			"Ready (2 Git files indexed, cached)",
 		);
+		expect(statusMsg?.msg.display).toBe(false);
 	});
 
 	it("does not emit duplicate warnings for moved or deleted untracked files", async () => {

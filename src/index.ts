@@ -302,15 +302,16 @@ function notifyBaselineStatus(
 			? "warning"
 			: "info";
 
-	// 1. Send transient TUI toast if UI is active
+	// 1. Send TUI notification if UI is active (presents directly without wiping chat container)
 	ctx?.ui?.notify?.(message, level);
 
-	// 2. Send persistent transcript notification into the chat feed
+	// 2. Send status message into session with display: false to prevent triggering
+	// an invasive chat rebuild that clears ephemeral startup banners (e.g. omp update notification)
 	pi.sendMessage(
 		{
 			customType: "duplicate-detector-status",
 			content: message,
-			display: true,
+			display: false,
 			attribution: "user",
 			details: {
 				status,
@@ -447,7 +448,7 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 			{
 				customType: "duplicate-detector-status",
 				content: message,
-				display: true,
+				display: false,
 				attribution: "user",
 				details: {
 					status: "failed",
