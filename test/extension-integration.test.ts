@@ -251,6 +251,166 @@ export function validateTransactionPayload(tx: { id: string; amount: number; sen
 		expect(harness.registeredTools.length).toBe(0);
 	});
 
+	it("does not flag pre-existing baseline duplicates when an unrelated part of a file is edited", async () => {
+		const sharedLogic = `
+export function computeSharedLegacyHash(items: string[]): string {
+	let hash = "seed_";
+	for (const item of items) {
+		if (!item) continue;
+		hash += item.trim().toLowerCase() + "_";
+	}
+	return hash;
+}
+`;
+		const fileAInitial = `export function getInitialValue(): number {
+	const valA = 100;
+	return valA + 1;
+}
+
+${sharedLogic}
+`;
+		const fileBInitial = `export function getOtherValue(): string {
+	const text = "hello";
+	return text.toUpperCase();
+}
+
+${sharedLogic}
+`;
+
+		// 1. Both files exist and are git-tracked BEFORE session starts
+		await Bun.write(path.join(tempDir, "module-a.ts"), fileAInitial);
+		await Bun.write(path.join(tempDir, "module-b.ts"), fileBInitial);
+		await gitTrack(tempDir);
+
+		const harness = createMockHarness();
+		duplicateDetectorExtension(harness.api);
+		const mockCtx = await harness.startSession(tempDir);
+
+		const toolCallHandlers = harness.eventHandlers["tool_call"] || [];
+		const toolResultHandlers = harness.eventHandlers["tool_result"] || [];
+		expect(toolResultHandlers.length).toBe(1);
+
+		// 2. Agent edits ONLY getInitialValue() at the top of module-a.ts.
+		// sharedLogic below is completely untouched.
+		const fileAModified = `export function getInitialValue(): number {
+	const valA = 200;
+	return valA + 2;
+}
+
+${sharedLogic}
+`;
+		// Tool call pre-capture
+		if (toolCallHandlers[0]) {
+			await toolCallHandlers[0](
+				{
+					type: "tool_call",
+					toolName: "edit",
+					toolCallId: "call_edit_unrelated",
+					input: { path: "module-a.ts" },
+				},
+				mockCtx,
+			);
+		}
+
+		await Bun.write(path.join(tempDir, "module-a.ts"), fileAModified);
+
+		const toolResultEvent = {
+			type: "tool_result",
+			toolName: "edit",
+			toolCallId: "call_edit_unrelated",
+			input: { path: "module-a.ts" },
+			content: [{ type: "text", text: "Successfully edited module-a.ts" }],
+			isError: false,
+		};
+
+		await toolResultHandlers[0]!(toolResultEvent, mockCtx);
+		const warnings = harness.sentMessages.filter(
+			(m) => m.msg.customType === "duplicate-detector-warning",
+		);
+		expect(warnings.length).toBe(0);
+
+		// 4. Now agent writes a genuinely NEW duplicate in a new file
+		const newDuplicateFile = `export function newlyPastedFunction(items: string[]): string {
+	let hash = "seed_";
+	for (const item of items) {
+		if (!item) continue;
+		hash += item.trim().toLowerCase() + "_";
+	}
+	return hash;
+}
+`;
+		await Bun.write(path.join(tempDir, "module-c.ts"), newDuplicateFile);
+
+		const writeResultEvent = {
+			type: "tool_result",
+			toolName: "write",
+			toolCallId: "call_write_new_dup",
+			input: { path: "module-c.ts" },
+			content: [{ type: "text", text: "Successfully wrote module-c.ts" }],
+			isError: false,
+		};
+
+		await toolResultHandlers[0]!(writeResultEvent, mockCtx);
+
+		// 5. Assert warning IS sent for the newly introduced duplicate!
+		const warningsAfter = harness.sentMessages.filter(
+			(m) => m.msg.customType === "duplicate-detector-warning",
+		);
+		expect(warningsAfter.length).toBe(1);
+		expect(warningsAfter[0]!.msg.details?.filePath).toBe("module-c.ts");
+	});
+
+	it("does not flag pre-existing duplicates even if edited inside when duplication was in baseline", async () => {
+		const sharedLogic = `
+export function runSharedProcessing(tokens: string[]): number {
+	let count = 0;
+	for (const token of tokens) {
+		if (!token) continue;
+		count += token.length;
+	}
+	return count;
+}
+`;
+		await Bun.write(path.join(tempDir, "proc-a.ts"), sharedLogic);
+		await Bun.write(path.join(tempDir, "proc-b.ts"), sharedLogic);
+		await gitTrack(tempDir);
+
+		const harness = createMockHarness();
+		duplicateDetectorExtension(harness.api);
+		const mockCtx = await harness.startSession(tempDir);
+
+		const toolResultHandlers = harness.eventHandlers["tool_result"] || [];
+
+		// Edit a line inside proc-a.ts
+		const procAModified = `
+export function runSharedProcessing(tokens: string[]): number {
+	let count = 10;
+	for (const token of tokens) {
+		if (!token) continue;
+		count += token.length;
+	}
+	return count;
+}
+`;
+		await Bun.write(path.join(tempDir, "proc-a.ts"), procAModified);
+
+		const toolResultEvent = {
+			type: "tool_result",
+			toolName: "write",
+			toolCallId: "call_proc_a",
+			input: { path: "proc-a.ts" },
+			content: [{ type: "text", text: "Wrote proc-a.ts" }],
+			isError: false,
+		};
+
+		await toolResultHandlers[0]!(toolResultEvent, mockCtx);
+
+		const warnings = harness.sentMessages.filter(
+			(m) => m.msg.customType === "duplicate-detector-warning",
+		);
+		expect(warnings.length).toBe(0);
+	});
+
 	it("injects system reminder into tool_result in in-band mode", async () => {
 		const existingCode = `
 export function computeInvoiceTaxes(items: Array<{ price: number; taxRate: number; exempt?: boolean; category?: string }>): number {

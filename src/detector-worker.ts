@@ -466,6 +466,7 @@ async function runBaselineIndexing(
 					cloneCount: currentIndex.clones.length,
 					durationMs: Date.now() - startTime,
 					status: baselineStatus,
+					baselineClones: currentIndex.getClones(),
 				}),
 			);
 			self.postMessage(
@@ -650,6 +651,17 @@ async function handleWorkerRequest(msg: WorkerRequestMessage): Promise<void> {
 						activeAbortController.signal,
 					);
 					self.postMessage(
+						createCompleteEvent({
+							indexedCount: recResult.indexedCount,
+							cachedCount: 0,
+							totalSourceBytes: 0,
+							cloneCount: currentIndex.clones.length,
+							durationMs: 0,
+							status: recResult.status,
+							baselineClones: currentIndex.getClones(),
+						}),
+					);
+					self.postMessage(
 						createSuccessResponse(msg.id, {
 							started: true,
 							rootDir: currentRootDir,
@@ -731,24 +743,31 @@ async function handleWorkerRequest(msg: WorkerRequestMessage): Promise<void> {
 
 		case "checkAndUpdate": {
 			const { filePath, content, format, revision = 1 } = msg.payload;
-			const rawClones = currentIndex.updateSource(filePath, content, format);
 			const canonicalFilePath = canonicalizePath(filePath);
 			const resolvedPath = path.resolve(filePath);
 
+			// Remove all path variations to ensure no duplicate self-match across symlinks
+			currentIndex.removeSource(canonicalFilePath);
+			currentIndex.removeSource(resolvedPath);
+			currentIndex.removeSource(filePath);
+
+			const rawClones = currentIndex.addSource(filePath, content, format);
+
+			cacheSourceShard(canonicalFilePath, content);
 			cacheSourceShard(filePath, content);
 
 			const clones = filterAndEvictStaleClones(rawClones, filePath);
-
 			const fileClones = clones.filter(
 				(c) =>
 					c.duplicationA.sourceId === filePath ||
 					c.duplicationB.sourceId === filePath ||
+					c.duplicationA.sourceId === canonicalFilePath ||
+					c.duplicationB.sourceId === canonicalFilePath ||
 					path.resolve(c.duplicationA.sourceId) === resolvedPath ||
 					path.resolve(c.duplicationB.sourceId) === resolvedPath ||
 					canonicalizePath(c.duplicationA.sourceId) === canonicalFilePath ||
 					canonicalizePath(c.duplicationB.sourceId) === canonicalFilePath,
 			);
-
 			const watchEntry = {
 				revision,
 				lastKnownCloneCount: fileClones.length,

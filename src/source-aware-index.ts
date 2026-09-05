@@ -14,6 +14,7 @@ import {
 } from "@jscpd/core";
 import { Tokenizer } from "@jscpd/tokenizer";
 import { getSupportedCodeFormat } from "./jscpd-engine";
+import { canonicalizePath } from "./repo-context";
 export class CompactSourceFrame {
 	constructor(
 		public readonly id: string,
@@ -689,6 +690,7 @@ export class SourceAwareCloneIndex {
 		const { insertFrames = false } = options;
 		let activeClones = new Map<string, ActiveCloneCandidate>();
 
+		const canonicalSourceId = canonicalizePath(sourceId);
 		for (const frame of frames) {
 			const frameStartLine =
 				"startLine" in frame
@@ -793,8 +795,11 @@ export class SourceAwareCloneIndex {
 				const targetEndRange = targetFrame.endRange;
 
 				// Disallow exact self-match at identical line/column position
+				const isSameSource =
+					targetFrame.sourceId === sourceId ||
+					canonicalizePath(targetFrame.sourceId) === canonicalSourceId;
 				if (
-					targetFrame.sourceId === sourceId &&
+					isSameSource &&
 					targetStartLine === frameStartLine &&
 					targetStartCol === frameStartCol
 				) {

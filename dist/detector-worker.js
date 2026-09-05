@@ -977,11 +977,11 @@ import * as path5 from "path";
 
 // src/disk-cache.ts
 import { Database } from "bun:sqlite";
-import * as crypto from "crypto";
-import * as fsSync from "fs";
-import * as fs from "fs/promises";
+import * as crypto2 from "crypto";
+import * as fsSync2 from "fs";
+import * as fs2 from "fs/promises";
 import * as os from "os";
-import * as path3 from "path";
+import * as path4 from "path";
 import * as zlib from "zlib";
 
 // node_modules/eventemitter3/index.mjs
@@ -12292,6 +12292,95 @@ async function getTrackedGitFiles(rootDir, options = {}) {
   }
 }
 
+// src/repo-context.ts
+import * as crypto from "crypto";
+import * as fsSync from "fs";
+import * as fs from "fs/promises";
+import * as path3 from "path";
+function canonicalizePath(targetPath) {
+  const resolved = path3.resolve(targetPath);
+  let current = resolved;
+  let suffix = "";
+  while (current && current !== path3.dirname(current)) {
+    try {
+      if (fsSync.existsSync(current)) {
+        const real = fsSync.realpathSync(current);
+        return suffix ? path3.join(real, suffix) : real;
+      }
+    } catch {}
+    suffix = suffix ? path3.join(path3.basename(current), suffix) : path3.basename(current);
+    current = path3.dirname(current);
+  }
+  return resolved;
+}
+function isOmpWorktreePath(targetPath) {
+  const normalized = targetPath.replace(/\\/g, "/");
+  return normalized.includes("/.omp/wt/") || normalized.includes("/.omp/worktrees/");
+}
+async function resolveRepositoryContext(cwd, signal) {
+  const canonicalCwd = canonicalizePath(cwd);
+  try {
+    const { stdout } = await execGit([
+      "rev-parse",
+      "--path-format=absolute",
+      "--show-toplevel",
+      "--git-dir",
+      "--git-common-dir"
+    ], canonicalCwd, { signal });
+    const lines = stdout.split(`
+`).map((l) => l.trim()).filter(Boolean);
+    const resolveEntry = (val) => {
+      if (!val)
+        return "";
+      return path3.isAbsolute(val) ? val : path3.resolve(canonicalCwd, val);
+    };
+    const workspaceRoot = canonicalizePath(resolveEntry(lines[0]));
+    const gitDir = canonicalizePath(resolveEntry(lines[1] || path3.join(workspaceRoot, ".git")));
+    const commonGitDir = canonicalizePath(resolveEntry(lines[2] || lines[1] || path3.join(workspaceRoot, ".git")));
+    let repositoryObjectDir = path3.join(commonGitDir, "objects");
+    const isOmpIsolation = isOmpWorktreePath(workspaceRoot) || isOmpWorktreePath(canonicalCwd);
+    if (isOmpIsolation && gitDir === commonGitDir) {
+      const alternatesFile = path3.join(gitDir, "objects", "info", "alternates");
+      try {
+        if (fsSync.existsSync(alternatesFile)) {
+          const content = await fs.readFile(alternatesFile, "utf-8");
+          const altLines = content.split(`
+`).map((l) => l.trim()).filter((l) => l && !l.startsWith("#"));
+          for (const line of altLines) {
+            const resolvedAlt = path3.isAbsolute(line) ? line : path3.resolve(path3.join(gitDir, "objects"), line);
+            const canonicalAlt = canonicalizePath(resolvedAlt);
+            if (fsSync.existsSync(canonicalAlt)) {
+              repositoryObjectDir = canonicalAlt;
+              break;
+            }
+          }
+        }
+      } catch {}
+    }
+    repositoryObjectDir = canonicalizePath(repositoryObjectDir);
+    const repositoryKey = crypto.createHash("sha256").update(`git-object-dir\x00${repositoryObjectDir}`).digest("hex").slice(0, 16);
+    return {
+      workspaceRoot,
+      isGit: true,
+      gitDir,
+      commonGitDir,
+      repositoryObjectDir,
+      repositoryKey,
+      isOmpIsolation
+    };
+  } catch {
+    const repositoryObjectDir = path3.join(canonicalCwd, ".non-git");
+    const repositoryKey = crypto.createHash("sha256").update(`directory\x00${canonicalCwd}`).digest("hex").slice(0, 16);
+    return {
+      workspaceRoot: canonicalCwd,
+      isGit: false,
+      repositoryObjectDir,
+      repositoryKey,
+      isOmpIsolation: false
+    };
+  }
+}
+
 // src/source-aware-index.ts
 class CompactSourceFrame {
   id;
@@ -12673,6 +12762,7 @@ class SourceAwareCloneIndex {
     const detectedClones = [];
     const { insertFrames = false } = options;
     let activeClones = new Map;
+    const canonicalSourceId = canonicalizePath(sourceId);
     for (const frame of frames) {
       const frameStartLine = "startLine" in frame ? frame.startLine : frame.start.loc?.start.line ?? frame.start.line ?? 1;
       const frameStartCol = "startCol" in frame ? frame.startCol : frame.start.loc?.start.column ?? frame.start.column ?? 1;
@@ -12720,7 +12810,8 @@ class SourceAwareCloneIndex {
         const targetEndCol = targetFrame.endCol;
         const targetEndPos = targetFrame.endPos;
         const targetEndRange = targetFrame.endRange;
-        if (targetFrame.sourceId === sourceId && targetStartLine === frameStartLine && targetStartCol === frameStartCol) {
+        const isSameSource = targetFrame.sourceId === sourceId || canonicalizePath(targetFrame.sourceId) === canonicalSourceId;
+        if (isSameSource && targetStartLine === frameStartLine && targetStartCol === frameStartCol) {
           continue;
         }
         const offsetKey = `${targetFrame.sourceId}:${targetStartRange - frameStartRange}`;
@@ -12843,15 +12934,15 @@ function getDefaultCacheDir() {
   if (process.platform === "win32") {
     const localAppData = process.env.LOCALAPPDATA;
     if (localAppData) {
-      return path3.join(localAppData, "omp", "duplicate-detector");
+      return path4.join(localAppData, "omp", "duplicate-detector");
     }
-    return path3.join(os.homedir(), "AppData", "Local", "omp", "duplicate-detector");
+    return path4.join(os.homedir(), "AppData", "Local", "omp", "duplicate-detector");
   }
   const xdgCacheHome = process.env.XDG_CACHE_HOME;
   if (xdgCacheHome) {
-    return path3.join(xdgCacheHome, "omp", "duplicate-detector");
+    return path4.join(xdgCacheHome, "omp", "duplicate-detector");
   }
-  return path3.join(os.homedir(), ".cache", "omp", "duplicate-detector");
+  return path4.join(os.homedir(), ".cache", "omp", "duplicate-detector");
 }
 function computeConfigFingerprint(config) {
   if (!config)
@@ -12871,12 +12962,12 @@ function computeConfigFingerprint(config) {
     crossFormats: config.crossFormats ?? false,
     formatsExts: sortedFormats
   };
-  return crypto.createHash("sha256").update(JSON.stringify(canonical)).digest("hex").slice(0, 16);
+  return crypto2.createHash("sha256").update(JSON.stringify(canonical)).digest("hex").slice(0, 16);
 }
 function computeWorkspaceCachePath(baseDir, repositoryKeyOrRootDir, configFingerprint) {
   const isKey = /^[0-9a-f]{16}$/i.test(repositoryKeyOrRootDir);
-  const repoKey = isKey ? repositoryKeyOrRootDir : crypto.createHash("sha256").update(path3.resolve(repositoryKeyOrRootDir)).digest("hex").slice(0, 16);
-  return path3.join(baseDir, `${repoKey}_${configFingerprint}_v${CACHE_FORMAT_VERSION}.sqlite`);
+  const repoKey = isKey ? repositoryKeyOrRootDir : crypto2.createHash("sha256").update(path4.resolve(repositoryKeyOrRootDir)).digest("hex").slice(0, 16);
+  return path4.join(baseDir, `${repoKey}_${configFingerprint}_v${CACHE_FORMAT_VERSION}.sqlite`);
 }
 var CACHE_FORMAT_MAGIC = "DUP3";
 var CACHE_FORMAT_VERSION = 5;
@@ -13083,9 +13174,9 @@ class DiskCacheManager {
   #deleteAllStmt = null;
   #closed = false;
   constructor(options) {
-    this.rootDir = path3.resolve(options.rootDir);
-    this.repositoryKey = options.repositoryKey ?? crypto.createHash("sha256").update(this.rootDir).digest("hex").slice(0, 16);
-    this.baseCacheDir = options.cacheDir ? path3.resolve(options.cacheDir) : getDefaultCacheDir();
+    this.rootDir = path4.resolve(options.rootDir);
+    this.repositoryKey = options.repositoryKey ?? crypto2.createHash("sha256").update(this.rootDir).digest("hex").slice(0, 16);
+    this.baseCacheDir = options.cacheDir ? path4.resolve(options.cacheDir) : getDefaultCacheDir();
     this.configFingerprint = computeConfigFingerprint(options.config);
     this.dbPath = computeWorkspaceCachePath(this.baseCacheDir, this.repositoryKey, this.configFingerprint);
     this.workspaceCacheDir = this.baseCacheDir;
@@ -13098,9 +13189,9 @@ class DiskCacheManager {
       return this.#db;
     let db = null;
     try {
-      const dir = path3.dirname(this.dbPath);
-      if (!fsSync.existsSync(dir)) {
-        fsSync.mkdirSync(dir, { recursive: true });
+      const dir = path4.dirname(this.dbPath);
+      if (!fsSync2.existsSync(dir)) {
+        fsSync2.mkdirSync(dir, { recursive: true });
       }
       db = new Database(this.dbPath, { create: true });
       db.exec("PRAGMA busy_timeout = 2000;");
@@ -13179,7 +13270,7 @@ class DiskCacheManager {
       const db = this.#getDb();
       if (!db || !this.#saveStmt)
         return;
-      const targetRelPath = relPath ?? (path3.isAbsolute(shard.sourceId) ? path3.relative(this.rootDir, shard.sourceId) : shard.sourceId);
+      const targetRelPath = relPath ?? (path4.isAbsolute(shard.sourceId) ? path4.relative(this.rootDir, shard.sourceId) : shard.sourceId);
       const normalizedRelPath = targetRelPath.replace(/\\/g, "/");
       const payload = packBinaryShard(shard);
       this.#saveStmt.run(normalizedRelPath, shard.contentHash, payload, Date.now());
@@ -13215,7 +13306,7 @@ class DiskCacheManager {
       const now = Date.now();
       const prepared = [];
       for (const item of items) {
-        const targetRelPath = item.relPath ?? (path3.isAbsolute(item.shard.sourceId) ? path3.relative(root, item.shard.sourceId) : item.shard.sourceId);
+        const targetRelPath = item.relPath ?? (path4.isAbsolute(item.shard.sourceId) ? path4.relative(root, item.shard.sourceId) : item.shard.sourceId);
         const normalizedRelPath = targetRelPath.replace(/\\/g, "/");
         const payload = packBinaryShard(item.shard);
         prepared.push({
@@ -13297,106 +13388,17 @@ class DiskCacheManager {
 async function cleanupLegacyCacheFiles(customCacheDir) {
   const baseDir = customCacheDir ?? getDefaultCacheDir();
   try {
-    if (!fsSync.existsSync(baseDir))
+    if (!fsSync2.existsSync(baseDir))
       return;
-    const entries = await fs.readdir(baseDir);
+    const entries = await fs2.readdir(baseDir);
     for (const entry of entries) {
       if (entry.endsWith(".sqlite") && !entry.includes(`_v${CACHE_FORMAT_VERSION}.sqlite`)) {
-        await fs.unlink(path3.join(baseDir, entry)).catch(() => {});
-        await fs.unlink(path3.join(baseDir, `${entry}-wal`)).catch(() => {});
-        await fs.unlink(path3.join(baseDir, `${entry}-shm`)).catch(() => {});
+        await fs2.unlink(path4.join(baseDir, entry)).catch(() => {});
+        await fs2.unlink(path4.join(baseDir, `${entry}-wal`)).catch(() => {});
+        await fs2.unlink(path4.join(baseDir, `${entry}-shm`)).catch(() => {});
       }
     }
   } catch {}
-}
-
-// src/repo-context.ts
-import * as crypto2 from "crypto";
-import * as fsSync2 from "fs";
-import * as fs2 from "fs/promises";
-import * as path4 from "path";
-function canonicalizePath(targetPath) {
-  const resolved = path4.resolve(targetPath);
-  let current = resolved;
-  let suffix = "";
-  while (current && current !== path4.dirname(current)) {
-    try {
-      if (fsSync2.existsSync(current)) {
-        const real = fsSync2.realpathSync(current);
-        return suffix ? path4.join(real, suffix) : real;
-      }
-    } catch {}
-    suffix = suffix ? path4.join(path4.basename(current), suffix) : path4.basename(current);
-    current = path4.dirname(current);
-  }
-  return resolved;
-}
-function isOmpWorktreePath(targetPath) {
-  const normalized = targetPath.replace(/\\/g, "/");
-  return normalized.includes("/.omp/wt/") || normalized.includes("/.omp/worktrees/");
-}
-async function resolveRepositoryContext(cwd, signal) {
-  const canonicalCwd = canonicalizePath(cwd);
-  try {
-    const { stdout } = await execGit([
-      "rev-parse",
-      "--path-format=absolute",
-      "--show-toplevel",
-      "--git-dir",
-      "--git-common-dir"
-    ], canonicalCwd, { signal });
-    const lines = stdout.split(`
-`).map((l) => l.trim()).filter(Boolean);
-    const resolveEntry = (val) => {
-      if (!val)
-        return "";
-      return path4.isAbsolute(val) ? val : path4.resolve(canonicalCwd, val);
-    };
-    const workspaceRoot = canonicalizePath(resolveEntry(lines[0]));
-    const gitDir = canonicalizePath(resolveEntry(lines[1] || path4.join(workspaceRoot, ".git")));
-    const commonGitDir = canonicalizePath(resolveEntry(lines[2] || lines[1] || path4.join(workspaceRoot, ".git")));
-    let repositoryObjectDir = path4.join(commonGitDir, "objects");
-    const isOmpIsolation = isOmpWorktreePath(workspaceRoot) || isOmpWorktreePath(canonicalCwd);
-    if (isOmpIsolation && gitDir === commonGitDir) {
-      const alternatesFile = path4.join(gitDir, "objects", "info", "alternates");
-      try {
-        if (fsSync2.existsSync(alternatesFile)) {
-          const content = await fs2.readFile(alternatesFile, "utf-8");
-          const altLines = content.split(`
-`).map((l) => l.trim()).filter((l) => l && !l.startsWith("#"));
-          for (const line of altLines) {
-            const resolvedAlt = path4.isAbsolute(line) ? line : path4.resolve(path4.join(gitDir, "objects"), line);
-            const canonicalAlt = canonicalizePath(resolvedAlt);
-            if (fsSync2.existsSync(canonicalAlt)) {
-              repositoryObjectDir = canonicalAlt;
-              break;
-            }
-          }
-        }
-      } catch {}
-    }
-    repositoryObjectDir = canonicalizePath(repositoryObjectDir);
-    const repositoryKey = crypto2.createHash("sha256").update(`git-object-dir\x00${repositoryObjectDir}`).digest("hex").slice(0, 16);
-    return {
-      workspaceRoot,
-      isGit: true,
-      gitDir,
-      commonGitDir,
-      repositoryObjectDir,
-      repositoryKey,
-      isOmpIsolation
-    };
-  } catch {
-    const repositoryObjectDir = path4.join(canonicalCwd, ".non-git");
-    const repositoryKey = crypto2.createHash("sha256").update(`directory\x00${canonicalCwd}`).digest("hex").slice(0, 16);
-    return {
-      workspaceRoot: canonicalCwd,
-      isGit: false,
-      repositoryObjectDir,
-      repositoryKey,
-      isOmpIsolation: false
-    };
-  }
 }
 
 // src/worker-protocol.ts
@@ -13765,7 +13767,8 @@ async function runBaselineIndexing(rootDir, options, signal) {
         totalSourceBytes,
         cloneCount: currentIndex.clones.length,
         durationMs: Date.now() - startTime,
-        status: baselineStatus
+        status: baselineStatus,
+        baselineClones: currentIndex.getClones()
       }));
       self.postMessage(createStatusEvent("ready", "Baseline indexing complete"));
       return { indexedCount, status: baselineStatus };
@@ -13908,6 +13911,15 @@ async function handleWorkerRequest(msg) {
           }
           activeAbortController = new AbortController;
           const recResult = await runIncrementalGitReconciliation(currentRootDir, options, activeAbortController.signal);
+          self.postMessage(createCompleteEvent({
+            indexedCount: recResult.indexedCount,
+            cachedCount: 0,
+            totalSourceBytes: 0,
+            cloneCount: currentIndex.clones.length,
+            durationMs: 0,
+            status: recResult.status,
+            baselineClones: currentIndex.getClones()
+          }));
           self.postMessage(createSuccessResponse(msg.id, {
             started: true,
             rootDir: currentRootDir,
@@ -13967,12 +13979,16 @@ async function handleWorkerRequest(msg) {
     }
     case "checkAndUpdate": {
       const { filePath, content, format, revision = 1 } = msg.payload;
-      const rawClones = currentIndex.updateSource(filePath, content, format);
       const canonicalFilePath = canonicalizePath(filePath);
       const resolvedPath = path5.resolve(filePath);
+      currentIndex.removeSource(canonicalFilePath);
+      currentIndex.removeSource(resolvedPath);
+      currentIndex.removeSource(filePath);
+      const rawClones = currentIndex.addSource(filePath, content, format);
+      cacheSourceShard(canonicalFilePath, content);
       cacheSourceShard(filePath, content);
       const clones = filterAndEvictStaleClones(rawClones, filePath);
-      const fileClones = clones.filter((c) => c.duplicationA.sourceId === filePath || c.duplicationB.sourceId === filePath || path5.resolve(c.duplicationA.sourceId) === resolvedPath || path5.resolve(c.duplicationB.sourceId) === resolvedPath || canonicalizePath(c.duplicationA.sourceId) === canonicalFilePath || canonicalizePath(c.duplicationB.sourceId) === canonicalFilePath);
+      const fileClones = clones.filter((c) => c.duplicationA.sourceId === filePath || c.duplicationB.sourceId === filePath || c.duplicationA.sourceId === canonicalFilePath || c.duplicationB.sourceId === canonicalFilePath || path5.resolve(c.duplicationA.sourceId) === resolvedPath || path5.resolve(c.duplicationB.sourceId) === resolvedPath || canonicalizePath(c.duplicationA.sourceId) === canonicalFilePath || canonicalizePath(c.duplicationB.sourceId) === canonicalFilePath);
       const watchEntry = {
         revision,
         lastKnownCloneCount: fileClones.length

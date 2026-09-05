@@ -132,8 +132,14 @@ export function toDisplayPath(sourceId: string, basePath?: string): string {
 		(typeof process !== "undefined" && process.cwd ? process.cwd() : "")
 	)?.replace(/\\/g, "/");
 
-	if (root && clean.startsWith(root)) {
-		clean = clean.slice(root.length);
+	if (root) {
+		if (clean.startsWith(root)) {
+			clean = clean.slice(root.length);
+		} else if (clean.startsWith(`/private${root}`)) {
+			clean = clean.slice(`/private${root}`.length);
+		} else if (root.startsWith("/private") && clean.startsWith(root.slice(8))) {
+			clean = clean.slice(root.slice(8).length);
+		}
 		if (clean.startsWith("/")) clean = clean.slice(1);
 	}
 	return clean || sourceId;

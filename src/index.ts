@@ -9,7 +9,12 @@ import {
 	type JscpdProjectConfig,
 } from "./config-loader";
 import { DuplicateDetectorCoordinator } from "./coordinator";
-import { DuplicateLedger } from "./duplicate-ledger";
+import {
+	cloneIntersectsRanges,
+	computeChangedLineRanges,
+	DuplicateLedger,
+	type LineRange,
+} from "./duplicate-ledger";
 import {
 	type BaselineStatus,
 	createIgnoreFilter,
@@ -231,6 +236,21 @@ function extractSettingsObject(
 	return undefined;
 }
 
+function extractPathFromToolInput(input: unknown): string | undefined {
+	if (!input || typeof input !== "object") return undefined;
+	const obj = input as Record<string, unknown>;
+	if (typeof obj.path === "string" && obj.path) {
+		return obj.path;
+	}
+	if (typeof obj.input === "string" && obj.input) {
+		const match = obj.input.match(/^\[([^#\]\r\n]+)(?:#[a-zA-Z0-9_-]+)?\]/m);
+		if (match?.[1]) {
+			return match[1].trim();
+		}
+	}
+	return undefined;
+}
+
 export function formatBaselineMessage(
 	status: BaselineStatus,
 	count: number,
@@ -337,6 +357,8 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 	let lastCtx: ExtensionContext | undefined;
 	const ledger = new DuplicateLedger();
 	const fileRevisions = new Map<string, number>();
+	const fileChangedRanges = new Map<string, LineRange[]>();
+	const preMutationContent = new Map<string, string | null>();
 	const coordinator = new DuplicateDetectorCoordinator();
 	let lastKnownHead: string | null = null;
 	let workerFailureNotified = false;
@@ -474,6 +496,9 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 			notifyWorkerFailure(payload.error ?? "Baseline indexing failed");
 			return;
 		}
+		if (payload.baselineClones && payload.baselineClones.length > 0) {
+			ledger.seedBaseline(payload.baselineClones, currentCwd);
+		}
 		workerFailureNotified = false;
 		notifyBaselineStatus(
 			pi,
@@ -527,8 +552,25 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 				: undefined;
 
 		if (!targetRel) return;
+		const targetRanges = fileChangedRanges.get(targetRel);
+		if (targetRanges) {
+			const isIntraFile = relA === relB;
+			const intersects = isIntraFile
+				? cloneIntersectsRanges(clone, targetRanges, "duplicationA") ||
+					cloneIntersectsRanges(clone, targetRanges, "duplicationB")
+				: cloneIntersectsRanges(
+						clone,
+						targetRanges,
+						targetRel === relB ? "duplicationB" : "duplicationA",
+					);
+			if (!intersects) return;
+		}
 
-		const freshClones = ledger.filterFreshClones(targetRel, [clone]);
+		const freshClones = ledger.filterFreshClones(
+			targetRel,
+			[clone],
+			currentCwd,
+		);
 		if (freshClones.length > 0) {
 			const fullPath = path.isAbsolute(targetRel)
 				? targetRel
@@ -573,6 +615,8 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 	pi.on("session_switch", async (event, ctx) => {
 		ledger.clear();
 		fileRevisions.clear();
+		fileChangedRanges.clear();
+		preMutationContent.clear();
 		workerFailureNotified = false;
 		lastKnownHead = null;
 		if (ctx?.cwd) {
@@ -615,6 +659,8 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 	pi.on("session_branch", async () => {
 		ledger.clear();
 		fileRevisions.clear();
+		fileChangedRanges.clear();
+		preMutationContent.clear();
 	});
 
 	pi.on("session_shutdown", async () => {
@@ -687,9 +733,44 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 	});
 
 	// Intercept write and edit tool executions to detect clones in newly added/modified code
+	// Pre-capture file content before write or edit mutation so diff calculation on tool_result
+	// knows exactly which line ranges were newly introduced vs pre-existing.
+	pi.on("tool_call", async (event, ctx) => {
+		if (event.toolName !== "write" && event.toolName !== "edit") return;
+		const rawPath = extractPathFromToolInput(event.input);
+		if (!rawPath || rawPath.includes("://")) return;
+		const fullPath = path.isAbsolute(rawPath)
+			? path.resolve(rawPath)
+			: path.resolve(ctx.cwd, rawPath);
+		try {
+			const file = Bun.file(fullPath);
+			if (await file.exists()) {
+				preMutationContent.set(fullPath, await file.text());
+			} else {
+				preMutationContent.set(fullPath, null);
+			}
+		} catch {
+			preMutationContent.set(fullPath, null);
+		}
+	});
+
 	pi.on(
 		"tool_result",
 		async (event, ctx): Promise<ToolResultEventResult | void> => {
+			let capturedOldContent: string | null | undefined;
+			let resolvedFullPath: string | undefined;
+
+			if (event.toolName === "write" || event.toolName === "edit") {
+				const rawPath = extractPathFromToolInput(event.input);
+				if (rawPath && !rawPath.includes("://") && ctx?.cwd) {
+					resolvedFullPath = path.isAbsolute(rawPath)
+						? path.resolve(rawPath)
+						: path.resolve(ctx.cwd, rawPath);
+					capturedOldContent = preMutationContent.get(resolvedFullPath);
+					preMutationContent.delete(resolvedFullPath);
+				}
+			}
+
 			if (event.isError) return;
 			if (!isEnabledForProject) return;
 			if (!config.checkOnMutation) return;
@@ -699,15 +780,9 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 				return;
 			}
 			if (event.toolName !== "write" && event.toolName !== "edit") return;
-			const input = event.input as { path?: string };
-			const rawPath = input?.path;
-			if (!rawPath || typeof rawPath !== "string") return;
-			// Skip internal protocol URLs (e.g. xd://, local://)
-			if (rawPath.includes("://")) return;
+			if (!resolvedFullPath) return;
 
-			const fullPath = path.isAbsolute(rawPath)
-				? path.resolve(rawPath)
-				: path.resolve(ctx.cwd, rawPath);
+			const fullPath = resolvedFullPath;
 			const relPath = path.relative(ctx.cwd, fullPath);
 			const normalizedRelPath = relPath.replace(/\\/g, "/");
 
@@ -720,7 +795,6 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 			) {
 				return;
 			}
-
 			try {
 				// Skip ignored files (matching ignore patterns, noise files, or test files)
 				const ignoreFilter = createIgnoreFilter(config.ignorePatterns, {
@@ -737,6 +811,27 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 				// Skip generated files
 				if (isGeneratedContent(content)) return;
 
+				let oldContent = capturedOldContent;
+				if (oldContent === undefined && ctx?.cwd) {
+					try {
+						const isGit = await isInsideGitWorkTree(ctx.cwd);
+						if (isGit) {
+							const { stdout } = await execGit(
+								["show", `HEAD:${normalizedRelPath}`],
+								ctx.cwd,
+							);
+							oldContent = stdout;
+						} else {
+							oldContent = null;
+						}
+					} catch {
+						oldContent = null;
+					}
+				}
+
+				const changedRanges = computeChangedLineRanges(oldContent, content);
+				fileChangedRanges.set(normalizedRelPath, changedRanges);
+
 				const revision = (fileRevisions.get(normalizedRelPath) ?? 0) + 1;
 				fileRevisions.set(normalizedRelPath, revision);
 
@@ -745,7 +840,24 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 					content,
 					revision,
 				);
-				const freshClones = ledger.filterFreshClones(normalizedRelPath, clones);
+				const mutatingClones = clones.filter((c) => {
+					if (cloneIntersectsRanges(c, changedRanges, "duplicationA")) {
+						return true;
+					}
+					const isIntraFile =
+						c.duplicationA.sourceId === c.duplicationB.sourceId ||
+						path.resolve(c.duplicationA.sourceId) ===
+							path.resolve(c.duplicationB.sourceId);
+					return (
+						isIntraFile &&
+						cloneIntersectsRanges(c, changedRanges, "duplicationB")
+					);
+				});
+				const freshClones = ledger.filterFreshClones(
+					normalizedRelPath,
+					mutatingClones,
+					currentCwd,
+				);
 
 				if (freshClones.length > 0) {
 					const fullReminder = ledger.formatReminder(
@@ -872,6 +984,8 @@ export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
 				isEnabledForProject = false;
 				ledger.clear();
 				fileRevisions.clear();
+				fileChangedRanges.clear();
+				preMutationContent.clear();
 				ctx.ui.notify("Duplicate detector disabled for this project.", "info");
 				notifyBaselineStatus(pi, ctx as ExtensionContext, "disabled", 0);
 			} else if (action === "status" || action === "") {

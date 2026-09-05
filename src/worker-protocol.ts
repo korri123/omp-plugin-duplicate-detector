@@ -180,6 +180,7 @@ export interface WorkerCompletePayload {
 	durationMs: number;
 	status?: BaselineStatus;
 	error?: string;
+	baselineClones?: IClone[];
 }
 
 export interface WorkerCompleteEvent {
