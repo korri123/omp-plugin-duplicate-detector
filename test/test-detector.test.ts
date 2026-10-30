@@ -1,12 +1,4 @@
 import { describe, expect, it } from "bun:test";
-import * as fs from "node:fs/promises";
-import * as os from "node:os";
-import * as path from "node:path";
-import {
-	createIgnoreFilter,
-	execGit,
-	getTrackedGitFiles,
-} from "../src/jscpd-engine";
 import { createTestFilter, isTestFile } from "../src/test-detector";
 
 describe("Multi-Language Test File Detector (src/test-detector.ts)", () => {
@@ -370,23 +362,6 @@ describe("Multi-Language Test File Detector (src/test-detector.ts)", () => {
 		});
 	});
 
-	describe("Integration with createIgnoreFilter", () => {
-		it("ignores test files by default in createIgnoreFilter", () => {
-			const ignoreFilter = createIgnoreFilter();
-			expect(ignoreFilter("src/user.test.ts")).toBe(true);
-			expect(ignoreFilter("src/test/java/UserTest.java")).toBe(true);
-			expect(ignoreFilter("src/auth/attestation.ts")).toBe(false);
-			expect(ignoreFilter("src/user.ts")).toBe(false);
-		});
-
-		it("respects ignoreTests: false in createIgnoreFilter", () => {
-			const ignoreFilter = createIgnoreFilter([], { ignoreTests: false });
-			expect(ignoreFilter("src/user.test.ts")).toBe(false);
-			expect(ignoreFilter("src/test/java/UserTest.java")).toBe(false);
-			expect(ignoreFilter("node_modules/pkg/index.js")).toBe(true); // noise pattern still ignored
-		});
-	});
-
 	describe("Monorepos & Nested Path Support", () => {
 		const nestedPaths = [
 			"apps/web/src/__tests__/Button.test.tsx",
@@ -418,68 +393,6 @@ describe("Multi-Language Test File Detector (src/test-detector.ts)", () => {
 			expect(isTestFile(".")).toBe(false);
 			expect(isTestFile(undefined as unknown as string)).toBe(false);
 			expect(isTestFile(null as unknown as string)).toBe(false);
-		});
-	});
-
-	describe("Git Tracked File Enumeration Integration", () => {
-		it("automatically filters test files from Git tracked enumeration", async () => {
-			const tempDir = await fs.mkdtemp(
-				path.join(os.tmpdir(), "test-detector-git-"),
-			);
-			try {
-				await execGit(["init"], tempDir);
-				await execGit(["config", "user.email", "test@example.com"], tempDir);
-				await execGit(["config", "user.name", "Test User"], tempDir);
-
-				await fs.mkdir(path.join(tempDir, "src"), { recursive: true });
-				await fs.mkdir(path.join(tempDir, "src/test/java"), {
-					recursive: true,
-				});
-
-				await fs.writeFile(
-					path.join(tempDir, "src/main.ts"),
-					"export const a = 1;\n",
-				);
-				await fs.writeFile(
-					path.join(tempDir, "src/main.test.ts"),
-					"export const b = 2;\n",
-				);
-				await fs.writeFile(
-					path.join(tempDir, "src/test/java/AppTest.java"),
-					"class AppTest {}\n",
-				);
-				await fs.writeFile(
-					path.join(tempDir, "src/attestation.ts"),
-					"export const c = 3;\n",
-				);
-
-				await execGit(["add", "."], tempDir);
-				await execGit(["commit", "-m", "init"], tempDir);
-
-				const trackedDefault = await getTrackedGitFiles(tempDir);
-				const relPathsDefault = trackedDefault.map((p) =>
-					path.relative(tempDir, p).replace(/\\/g, "/"),
-				);
-
-				expect(relPathsDefault).toContain("src/main.ts");
-				expect(relPathsDefault).toContain("src/attestation.ts");
-				expect(relPathsDefault).not.toContain("src/main.test.ts");
-				expect(relPathsDefault).not.toContain("src/test/java/AppTest.java");
-
-				const trackedAll = await getTrackedGitFiles(tempDir, {
-					ignoreTests: false,
-				});
-				const relPathsAll = trackedAll.map((p) =>
-					path.relative(tempDir, p).replace(/\\/g, "/"),
-				);
-
-				expect(relPathsAll).toContain("src/main.ts");
-				expect(relPathsAll).toContain("src/main.test.ts");
-				expect(relPathsAll).toContain("src/test/java/AppTest.java");
-				expect(relPathsAll).toContain("src/attestation.ts");
-			} finally {
-				await fs.rm(tempDir, { recursive: true, force: true });
-			}
 		});
 	});
 });

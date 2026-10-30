@@ -7,7 +7,7 @@
  */
 
 import * as path from "node:path";
-import ignore from "ignore";
+import ignore, { type Ignore } from "ignore";
 
 export interface TestFileDetectorOptions {
 	/**
@@ -202,6 +202,8 @@ const TEST_ONLY_EXTENSIONS: Record<string, true> = {
 /**
  * Checks whether a given relative or absolute file path corresponds to a test file,
  * test directory, mock, test helper, or fixture across any programming language.
+ * Compiles the option patterns on every call; use {@link createTestFilter} for
+ * repeated checks.
  *
  * @param filePath - The file or directory path to inspect.
  * @param options - Optional configuration including custom/exclude patterns.
@@ -211,45 +213,60 @@ export function isTestFile(
 	filePath: string,
 	options: TestFileDetectorOptions = {},
 ): boolean {
+	return createTestFilter(options)(filePath);
+}
+
+/**
+ * Creates a predicate that returns `true` if a path is identified as a test
+ * file. Custom/exclude patterns (gitignore syntax) are compiled once.
+ */
+export function createTestFilter(
+	options: TestFileDetectorOptions = {},
+): (relPath: string) => boolean {
 	if (options.ignoreTests === false) {
-		return false;
+		return () => false;
 	}
-
-	if (!filePath || typeof filePath !== "string") {
-		return false;
-	}
-
-	const normalized = filePath.trim().replace(/\\/g, "/").replace(/^\.\//, "");
-	if (!normalized || normalized === ".") {
-		return false;
-	}
-
-	// 1. Check user-defined exclude patterns (takes precedence to un-ignore)
-	if (options.excludeTestPatterns && options.excludeTestPatterns.length > 0) {
-		try {
-			const excludeFilter = ignore().add(options.excludeTestPatterns);
-			if (excludeFilter.ignores(normalized)) {
-				return false;
-			}
-		} catch {
-			// Ignore pattern syntax errors gracefully
+	const exclude = compilePatterns(options.excludeTestPatterns);
+	const custom = compilePatterns(options.customTestPatterns);
+	return (filePath: string) => {
+		if (!filePath || typeof filePath !== "string") {
+			return false;
 		}
-	}
-
-	// 2. Check user-defined custom test patterns
-	if (options.customTestPatterns && options.customTestPatterns.length > 0) {
-		try {
-			const customFilter = ignore().add(options.customTestPatterns);
-			if (customFilter.ignores(normalized)) {
-				return true;
-			}
-		} catch {
-			// Ignore pattern syntax errors gracefully
+		// No trimming: leading/trailing spaces are legal in file names.
+		const normalized = filePath.replace(/\\/g, "/").replace(/^\.\//, "");
+		if (!normalized || normalized === ".") {
+			return false;
 		}
-	}
+		// User-defined exclude patterns take precedence (keep as production code).
+		if (exclude && matches(exclude, normalized)) {
+			return false;
+		}
+		if (custom && matches(custom, normalized)) {
+			return true;
+		}
+		return isDefaultTestPath(normalized);
+	};
+}
 
+function compilePatterns(patterns: string[] | undefined): Ignore | undefined {
+	const valid = patterns?.filter(
+		(pattern) => typeof pattern === "string" && pattern.length > 0,
+	);
+	return valid && valid.length > 0 ? ignore().add(valid) : undefined;
+}
+
+function matches(patterns: Ignore, normalized: string): boolean {
+	try {
+		return patterns.ignores(normalized);
+	} catch {
+		// `ignore` rejects absolute paths; those cannot match relative patterns.
+		return false;
+	}
+}
+
+/** Built-in multi-language heuristics on a normalized POSIX path. */
+function isDefaultTestPath(normalized: string): boolean {
 	const ext = path.extname(normalized).toLowerCase();
-
 	// 3. Test-only extensions (e.g. .bats, .snap, .snapshot)
 	if (TEST_ONLY_EXTENSIONS[ext]) {
 		return true;
@@ -321,17 +338,4 @@ export function isTestFile(
 	}
 
 	return false;
-}
-
-/**
- * Creates a fast predicate function that returns `true` if a path is identified as a test file.
- */
-export function createTestFilter(
-	options: TestFileDetectorOptions = {},
-): (relPath: string) => boolean {
-	if (options.ignoreTests === false) {
-		return () => false;
-	}
-
-	return (relPath: string) => isTestFile(relPath, options);
 }

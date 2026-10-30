@@ -1,1049 +1,544 @@
+/**
+ * omp extension: warns the model when a write/edit it just made duplicates
+ * existing code in the repository.
+ *
+ * The factory only registers handlers. Each session (main and subagents)
+ * acquires a shared workspace from the detector service on `session_start`
+ * and releases it on `session_shutdown`; every write/edit is checked against
+ * the index and new duplicates are reported once per session.
+ */
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
 import type {
 	ExtensionAPI,
 	ExtensionContext,
-	ToolResultEventResult,
+	ToolResultEvent,
 } from "@oh-my-pi/pi-coding-agent";
+import { getPluginSettings } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/loader";
+import type {
+	EditToolDetails,
+	EditToolPerFileResult,
+} from "@oh-my-pi/pi-tui/tools/edit";
+import { PLUGIN_NAME, type ResolvedConfig, resolveConfig } from "./config";
+import { acquireWorkspace, type WorkspaceHandle } from "./detector/service";
+import { WarningLedger } from "./ledger";
 import {
-	findProjectJscpdConfig,
-	type JscpdProjectConfig,
-} from "./config-loader";
-import { DuplicateDetectorCoordinator } from "./coordinator";
+	isProjectEnabled,
+	removeLegacyCacheFiles,
+	resolveProjectRoot,
+	setProjectEnabled,
+} from "./project-state";
+import { buildReminder, type Reminder } from "./reminder";
+import { createWarningRenderer } from "./render";
 import {
-	cloneIntersectsRanges,
-	computeChangedLineRanges,
-	DuplicateLedger,
-	type LineRange,
-} from "./duplicate-ledger";
-import {
-	type BaselineStatus,
-	createIgnoreFilter,
-	execGit,
-	isGeneratedContent,
-	isInsideGitWorkTree,
-	MAX_INDEXED_FILES,
-} from "./jscpd-engine";
-import { isProjectEnabled, setProjectEnabled } from "./project-state";
-import {
-	DuplicateNotificationComponent,
-	type DuplicateNotificationData,
-	DuplicateStatusComponent,
-	type DuplicateStatusData,
-	type ThemeLike,
-} from "./tui-notification";
+	type CheckRequest,
+	WARNING_MESSAGE_TYPE,
+	type WorkspaceStatus,
+} from "./types";
 
-export interface DuplicateDetectorConfig {
-	minLines: number;
-	minTokens: number;
-	maxLines?: number;
-	maxIndexedFiles?: number;
-	checkOnMutation: boolean;
-	reminderMode: "in-band" | "steer" | "none";
-	ignorePatterns: string[];
-	ignoreTests: boolean;
-	customTestPatterns?: string[];
-	excludeTestPatterns?: string[];
-	formatsExts?: Record<string, string[]>;
-	configSource?: string;
+const STATUS_KEY = "duplicate-detector";
+/** How long a tool_result waits for its check before the warning is delivered later instead. */
+const CHECK_BUDGET_MS = 1_500;
+/** `write` pre-images above this size are not captured (the service falls back to the indexed version). */
+const MAX_BEFORE_BYTES = 100 * 1024;
+/** Cap on captured pre-images awaiting their tool_result (a blocked call never gets one). */
+const MAX_PENDING_BEFORES = 64;
+/** How long a `write`'s tool_call waits for a pending workspace start (omp fails a stalled tool_call closed). */
+const START_WAIT_MS = 1_000;
+/** omp 18.14 tools that never change files; every other non-reported tool triggers a rescan. */
+const READ_ONLY_TOOLS = new Set([
+	"read",
+	"grep",
+	"glob",
+	"find",
+	"ast_grep",
+	"lsp",
+	"web_search",
+	"ask",
+	"wait",
+	"todo",
+	"think",
+	"yield",
+	"goal",
+	"advise",
+	"checkpoint",
+	"rewind",
+	"context_notes",
+	"recall",
+]);
+
+export interface ExtensionDeps {
+	/** Merged omp plugin settings for this plugin. */
+	loadPluginSettings(cwd: string): Promise<Record<string, unknown>>;
+	/** Overrides the `/duplicates on|off` state directory (defaults to the user cache dir). */
+	cacheDir?: string;
 }
 
-const DEFAULT_CONFIG: DuplicateDetectorConfig = {
-	minLines: 5,
-	minTokens: 40,
-	checkOnMutation: true,
-	reminderMode: "steer",
-	ignorePatterns: [],
-	ignoreTests: true,
-};
-
-/**
- * Resolves user settings from configuration context merged with project-level jscpd configuration.
- */
-export function resolveConfig(
-	rawSettings?: Record<string, unknown>,
-	projectConfig?: JscpdProjectConfig | null,
-): DuplicateDetectorConfig {
-	const baseMinLines = projectConfig?.minLines ?? DEFAULT_CONFIG.minLines;
-	const baseMinTokens = projectConfig?.minTokens ?? DEFAULT_CONFIG.minTokens;
-	const baseMaxLines = projectConfig?.maxLines;
-	const baseMaxIndexedFiles = projectConfig?.maxIndexedFiles;
-	const baseFormatsExts = projectConfig?.formatsExts;
-	const baseIgnoreTests =
-		projectConfig?.ignoreTests ?? DEFAULT_CONFIG.ignoreTests;
-	const baseCustomTestPatterns = projectConfig?.customTestPatterns;
-	const baseExcludeTestPatterns = projectConfig?.excludeTestPatterns;
-	const projectIgnores = projectConfig?.ignore ?? [];
-
-	let configSource: string | undefined;
-	if (projectConfig?.sourcePath) {
-		configSource =
-			projectConfig.sourceType === "package.json"
-				? `${projectConfig.sourcePath}#jscpd`
-				: projectConfig.sourcePath;
-	}
-
-	if (!rawSettings) {
-		return {
-			minLines: baseMinLines,
-			minTokens: baseMinTokens,
-			maxLines: baseMaxLines,
-			maxIndexedFiles: baseMaxIndexedFiles,
-			checkOnMutation: DEFAULT_CONFIG.checkOnMutation,
-			reminderMode: DEFAULT_CONFIG.reminderMode,
-			ignorePatterns: projectIgnores,
-			ignoreTests: baseIgnoreTests,
-			customTestPatterns: baseCustomTestPatterns,
-			excludeTestPatterns: baseExcludeTestPatterns,
-			formatsExts: baseFormatsExts,
-			configSource,
-		};
-	}
-
-	const minLines =
-		typeof rawSettings.minLines === "number"
-			? Math.max(3, rawSettings.minLines)
-			: baseMinLines;
-	const minTokens =
-		typeof rawSettings.minTokens === "number"
-			? Math.max(10, rawSettings.minTokens)
-			: baseMinTokens;
-	const checkOnMutation =
-		typeof rawSettings.checkOnMutation === "boolean"
-			? rawSettings.checkOnMutation
-			: DEFAULT_CONFIG.checkOnMutation;
-
-	let maxIndexedFiles: number | undefined = baseMaxIndexedFiles;
-	if (
-		typeof rawSettings.maxIndexedFiles === "number" &&
-		!Number.isNaN(rawSettings.maxIndexedFiles) &&
-		rawSettings.maxIndexedFiles > 0
-	) {
-		maxIndexedFiles = Math.floor(rawSettings.maxIndexedFiles);
-	} else if (typeof rawSettings.maxIndexedFiles === "string") {
-		const parsed = Number.parseInt(rawSettings.maxIndexedFiles, 10);
-		if (!Number.isNaN(parsed) && parsed > 0) {
-			maxIndexedFiles = parsed;
-		}
-	}
-
-	const reminderMode =
-		rawSettings.reminderMode === "steer" ||
-		rawSettings.reminderMode === "none" ||
-		rawSettings.reminderMode === "in-band"
-			? rawSettings.reminderMode
-			: DEFAULT_CONFIG.reminderMode;
-
-	let userIgnores: string[] = [];
-	if (typeof rawSettings.ignorePatterns === "string") {
-		userIgnores = rawSettings.ignorePatterns
-			.split(",")
-			.map((p) => p.trim())
-			.filter((p) => p.length > 0);
-	} else if (Array.isArray(rawSettings.ignorePatterns)) {
-		userIgnores = rawSettings.ignorePatterns
-			.map(String)
-			.map((p) => p.trim())
-			.filter(Boolean);
-	}
-
-	let ignoreTests = baseIgnoreTests;
-	if (typeof rawSettings.ignoreTests === "boolean") {
-		ignoreTests = rawSettings.ignoreTests;
-	} else if (typeof rawSettings.ignoreTests === "string") {
-		if (rawSettings.ignoreTests.toLowerCase() === "false") {
-			ignoreTests = false;
-		} else if (rawSettings.ignoreTests.toLowerCase() === "true") {
-			ignoreTests = true;
-		}
-	}
-
-	let userCustomTests: string[] = [];
-	if (typeof rawSettings.customTestPatterns === "string") {
-		userCustomTests = rawSettings.customTestPatterns
-			.split(",")
-			.map((p) => p.trim())
-			.filter((p) => p.length > 0);
-	} else if (Array.isArray(rawSettings.customTestPatterns)) {
-		userCustomTests = rawSettings.customTestPatterns
-			.map(String)
-			.map((p) => p.trim())
-			.filter(Boolean);
-	}
-	const mergedCustomTests = Array.from(
-		new Set([...(baseCustomTestPatterns ?? []), ...userCustomTests]),
-	);
-
-	let userExcludeTests: string[] = [];
-	if (typeof rawSettings.excludeTestPatterns === "string") {
-		userExcludeTests = rawSettings.excludeTestPatterns
-			.split(",")
-			.map((p) => p.trim())
-			.filter((p) => p.length > 0);
-	} else if (Array.isArray(rawSettings.excludeTestPatterns)) {
-		userExcludeTests = rawSettings.excludeTestPatterns
-			.map(String)
-			.map((p) => p.trim())
-			.filter(Boolean);
-	}
-	const mergedExcludeTests = Array.from(
-		new Set([...(baseExcludeTestPatterns ?? []), ...userExcludeTests]),
-	);
-
-	const mergedIgnores = Array.from(
-		new Set([...projectIgnores, ...userIgnores]),
-	);
-
-	return {
-		minLines,
-		minTokens,
-		maxLines: baseMaxLines,
-		maxIndexedFiles,
-		checkOnMutation,
-		reminderMode,
-		ignorePatterns: mergedIgnores,
-		ignoreTests,
-		customTestPatterns:
-			mergedCustomTests.length > 0 ? mergedCustomTests : undefined,
-		excludeTestPatterns:
-			mergedExcludeTests.length > 0 ? mergedExcludeTests : undefined,
-		formatsExts: baseFormatsExts,
-		configSource,
-	};
+interface ActiveWorkspace {
+	handle: WorkspaceHandle;
+	config: ResolvedConfig;
+	unsubscribe: () => void;
 }
 
-function extractSettingsObject(
-	event: unknown,
-	ctx: unknown,
-): Record<string, unknown> | undefined {
-	if (
-		event &&
-		typeof event === "object" &&
-		"settings" in event &&
-		event.settings &&
-		typeof event.settings === "object"
-	) {
-		return event.settings as Record<string, unknown>;
-	}
-	if (
-		ctx &&
-		typeof ctx === "object" &&
-		"settings" in ctx &&
-		ctx.settings &&
-		typeof ctx.settings === "object"
-	) {
-		return ctx.settings as Record<string, unknown>;
-	}
-	return undefined;
+/** A `write` pre-image captured in tool_call, valid only for the path it was read from. */
+interface CapturedBefore {
+	path: string;
+	content: string | null | undefined;
+}
+/** Fields shared by single-file `EditToolDetails` and multi-file `perFileResults` entries. */
+type EditEntry = Pick<
+	EditToolPerFileResult,
+	"oldText" | "newText" | "op" | "snapshotsPruned" | "sourcePath" | "isError"
+> & { path?: string };
+
+let legacyCleanupStarted = false;
+
+function resolveToolPath(cwd: string, raw: unknown): string | undefined {
+	if (typeof raw !== "string" || raw.trim() === "" || raw.includes("://"))
+		return undefined;
+	const expanded =
+		raw === "~" || raw.startsWith("~/")
+			? path.join(os.homedir(), raw.slice(1))
+			: raw;
+	return path.resolve(cwd, expanded);
 }
 
-function extractPathFromToolInput(input: unknown): string | undefined {
-	if (!input || typeof input !== "object") return undefined;
-	const obj = input as Record<string, unknown>;
-	if (typeof obj.path === "string" && obj.path) {
-		return obj.path;
+/** Pre-image for a `write`: content, `null` when absent, `undefined` when unknown or too large. */
+async function readBefore(
+	filePath: string,
+): Promise<string | null | undefined> {
+	try {
+		const stat = await fs.stat(filePath);
+		if (!stat.isFile() || stat.size > MAX_BEFORE_BYTES) return undefined;
+		return await fs.readFile(filePath, "utf8");
+	} catch (err) {
+		return (err as NodeJS.ErrnoException).code === "ENOENT" ? null : undefined;
 	}
-	if (typeof obj.input === "string" && obj.input) {
-		const match = obj.input.match(/^\[([^#\]\r\n]+)(?:#[a-zA-Z0-9_-]+)?\]/m);
-		if (match?.[1]) {
-			return match[1].trim();
-		}
-	}
-	return undefined;
 }
 
-export function formatBaselineMessage(
-	status: BaselineStatus,
-	count: number,
-	cachedCount?: number,
-	maxIndexedFiles?: number,
-): string {
-	if (status === "disabled") {
-		return "Duplicate detector: Disabled for this project (use '/duplicates on' to enable)";
+function editRequests(
+	details: EditToolDetails | undefined,
+	input: Record<string, unknown>,
+	cwd: string,
+): CheckRequest[] {
+	const entries: EditEntry[] = details?.perFileResults?.length
+		? details.perFileResults
+		: details
+			? [details]
+			: [];
+	const requests: CheckRequest[] = [];
+	for (const entry of entries) {
+		if (entry.isError) continue;
+		const target = resolveToolPath(cwd, entry.path ?? input.path);
+		if (!target) continue;
+		const source = entry.sourcePath
+			? resolveToolPath(cwd, entry.sourcePath)
+			: undefined;
+		const moved = source !== undefined && source !== target;
+		const pruned = entry.snapshotsPruned === true;
+		const before =
+			pruned || (entry.oldText === undefined && entry.op !== "create")
+				? undefined
+				: (entry.oldText ?? null);
+		const request: CheckRequest =
+			!pruned && typeof entry.newText === "string"
+				? { path: target, before, after: entry.newText }
+				: { path: target, before };
+		// Without a snapshot, the source's indexed version is the move target's pre-image.
+		if (moved) request.beforePath = source;
+		requests.push(request);
+		// After the target (which snapshots the source at enqueue): checking the gone source drops it from the index.
+		if (moved) requests.push({ path: source });
 	}
-
-	if (status === "skipped_not_git") {
-		return "Duplicate detector: Baseline skipped (not a Git repository; mutation checks active)";
-	}
-	const fileWord = count === 1 ? "file" : "files";
-	const formattedCount = count.toLocaleString();
-
-	let cacheDetail = "";
-	if (cachedCount !== undefined && count > 0) {
-		if (cachedCount === count) {
-			cacheDetail = ", cached";
-		} else if (cachedCount === 0) {
-			cacheDetail = ", uncached";
-		} else {
-			cacheDetail = `, ${cachedCount.toLocaleString()} cached`;
-		}
-	}
-
-	if (status === "complete") {
-		const gitLabel = count === 1 ? "Git file" : "Git files";
-		return `Duplicate detector: Ready (${formattedCount} ${gitLabel} indexed${cacheDetail})`;
-	}
-
-	if (status === "capped_file_count") {
-		const limit = (maxIndexedFiles ?? MAX_INDEXED_FILES).toLocaleString();
-		return `Duplicate detector: Ready (${formattedCount} ${fileWord} indexed${cacheDetail}, capped at ${limit} file limit)`;
-	}
-
-	if (status === "capped_source_bytes") {
-		return `Duplicate detector: Ready (${formattedCount} ${fileWord} indexed${cacheDetail}, capped at 64 MB limit)`;
-	}
-
-	return "";
+	return requests;
 }
 
-function notifyBaselineStatus(
-	pi: ExtensionAPI,
-	ctx:
-		| {
-				ui?: {
-					notify: (msg: string, type?: "info" | "warning" | "error") => void;
-				};
-		  }
-		| undefined,
-	status: BaselineStatus,
-	count: number,
-	cachedCount?: number,
-	maxIndexedFiles?: number,
-): void {
-	const message = formatBaselineMessage(
-		status,
-		count,
-		cachedCount,
-		maxIndexedFiles,
-	);
-	if (!message) return;
-
-	const level: "info" | "warning" =
-		status === "capped_file_count" || status === "capped_source_bytes"
-			? "warning"
-			: "info";
-
-	// 1. Send TUI notification if UI is active (presents directly without wiping chat container)
-	ctx?.ui?.notify?.(message, level);
-
-	// 2. Send status message into session with display: false to prevent triggering
-	// an invasive chat rebuild that clears ephemeral startup banners (e.g. omp update notification)
-	pi.sendMessage(
-		{
-			customType: "duplicate-detector-status",
-			content: message,
-			display: false,
-			attribution: "user",
-			details: {
-				status,
-				count,
-				cachedCount,
-				content: message,
-			},
-		},
-		{ triggerTurn: false },
-	);
-}
-
-/**
- * Main extension factory for oh-my-pi duplicate detector plugin powered by jscpd.
- */
-export default function duplicateDetectorExtension(pi: ExtensionAPI): void {
-	pi.setLabel("Duplicate Detector");
-
-	let isEnabledForProject = true;
-	let activeRawSettings: Record<string, unknown> | undefined;
-	let config: DuplicateDetectorConfig = { ...DEFAULT_CONFIG };
-	let currentCwd: string = process.cwd();
-	let lastCtx: ExtensionContext | undefined;
-	const ledger = new DuplicateLedger();
-	const fileRevisions = new Map<string, number>();
-	const fileChangedRanges = new Map<string, LineRange[]>();
-	const preMutationContent = new Map<string, string | null>();
-	const coordinator = new DuplicateDetectorCoordinator();
-	let lastKnownHead: string | null = null;
-	let workerFailureNotified = false;
-
-	const reconcileParentGitState = async (cwd: string): Promise<void> => {
-		if (!isEnabledForProject) return;
-		try {
-			const isGit = await isInsideGitWorkTree(cwd);
-			if (!isGit) return;
-
-			const { stdout: currentHeadRaw } = await execGit(
-				["rev-parse", "HEAD"],
-				cwd,
-			).catch(() => ({ stdout: "" }));
-			const currentHead = currentHeadRaw.trim();
-
-			const modifiedFiles: string[] = [];
-			let reconciliationSucceeded = true;
-
-			if (lastKnownHead && currentHead && lastKnownHead !== currentHead) {
-				try {
-					const { stdout: diffOut } = await execGit(
-						[
-							"diff",
-							"--name-status",
-							"-z",
-							lastKnownHead,
-							currentHead,
-							"--",
-							".",
-						],
-						cwd,
-					);
-
-					const tokens = diffOut.split("\0");
-					let t = 0;
-					while (t < tokens.length) {
-						const status = tokens[t]?.trim();
-						t++;
-						if (!status) continue;
-						if (status.startsWith("R") || status.startsWith("C")) {
-							const oldPath = tokens[t]?.trim();
-							t++;
-							const newPath = tokens[t]?.trim();
-							t++;
-							if (oldPath) modifiedFiles.push(path.resolve(cwd, oldPath));
-							if (newPath) modifiedFiles.push(path.resolve(cwd, newPath));
-						} else {
-							const filePath = tokens[t]?.trim();
-							t++;
-							if (filePath) modifiedFiles.push(path.resolve(cwd, filePath));
-						}
-					}
-				} catch {
-					reconciliationSucceeded = false;
-				}
-			}
-			const { stdout: statusOut } = await execGit(
-				["status", "--porcelain", "-z", "-uall", "--", "."],
-				cwd,
-			).catch(() => ({ stdout: "" }));
-
-			const statusEntries = statusOut.split("\0");
-			let i = 0;
-			while (i < statusEntries.length) {
-				const entry = statusEntries[i];
-				i++;
-				if (!entry || entry.length < 4) continue;
-				const statusCode = entry.slice(0, 2);
-				const relPath = entry.slice(3).trim();
-				if (statusCode.includes("R") && i < statusEntries.length) {
-					const oldRelPath = statusEntries[i]?.trim();
-					i++;
-					if (oldRelPath) {
-						modifiedFiles.push(path.resolve(cwd, oldRelPath));
-					}
-				}
-				if (relPath) {
-					modifiedFiles.push(path.resolve(cwd, relPath));
-				}
-			}
-			if (modifiedFiles.length > 0) {
-				const uniqueFiles = [...new Set(modifiedFiles)];
-				try {
-					await coordinator.reconcile(
-						uniqueFiles.map((filePath) => ({ filePath })),
-					);
-				} catch {
-					reconciliationSucceeded = false;
-				}
-			}
-
-			// Only advance the watermark when reconciliation succeeded
-			if (reconciliationSucceeded && currentHead) {
-				lastKnownHead = currentHead;
-			}
-		} catch {
-			// Fail open
-		}
-	};
-	const notifyWorkerFailure = (error: unknown): void => {
-		if (workerFailureNotified || !lastCtx) return;
-		workerFailureNotified = true;
-		const reason = error instanceof Error ? error.message : String(error);
-		const message = `Duplicate detector: Background worker failed (${reason})`;
-
-		lastCtx.ui?.notify?.(message, "error");
-		pi.sendMessage(
+/** Check requests for a file-mutating tool result, or `undefined` when the tool is not reported per file. */
+function mutationRequests(
+	event: ToolResultEvent,
+	cwd: string,
+	captured: CapturedBefore | undefined,
+): CheckRequest[] | undefined {
+	if (event.toolName === "write") {
+		// omp resolves `@`, `:`, hashline wrappers and file:// itself; trust only its result.
+		const resolved = (event.details as { resolvedPath?: unknown } | undefined)
+			?.resolvedPath;
+		if (typeof resolved !== "string" || resolved === "") return undefined;
+		const target = path.resolve(resolved);
+		return [
 			{
-				customType: "duplicate-detector-status",
-				content: message,
-				display: false,
-				attribution: "user",
-				details: {
-					status: "failed",
-					error: reason,
-					content: message,
-				},
+				path: target,
+				before: captured?.path === target ? captured.content : undefined,
 			},
-			{ triggerTurn: false },
-		);
-	};
-
-	// Wire coordinator event listeners
-	coordinator.on("progress", (payload) => {
-		pi.logger.debug("Duplicate detector indexing progress", {
-			...payload,
-		});
-	});
-
-	coordinator.on("complete", (payload) => {
-		if (!isEnabledForProject) return;
-		const status: BaselineStatus = payload.status ?? "complete";
-		if (status === "failed") {
-			notifyWorkerFailure(payload.error ?? "Baseline indexing failed");
-			return;
-		}
-		if (payload.baselineClones && payload.baselineClones.length > 0) {
-			ledger.seedBaseline(payload.baselineClones, currentCwd);
-		}
-		workerFailureNotified = false;
-		notifyBaselineStatus(
-			pi,
-			lastCtx,
-			status,
-			payload.indexedCount,
-			payload.cachedCount,
-			config.maxIndexedFiles,
-		);
-	});
-
-	coordinator.on("status", (payload) => {
-		pi.logger.debug("Duplicate detector worker status", {
-			...payload,
-		});
-		if (payload.status === "error") {
-			notifyWorkerFailure(payload.message ?? "Unknown worker error");
-		}
-	});
-
-	coordinator.on("error", (err) => {
-		pi.logger.warn("Duplicate detector coordinator error", {
-			error: err instanceof Error ? err.message : String(err),
-		});
-		notifyWorkerFailure(err);
-	});
-
-	coordinator.on("lateFinding", async ({ clone }) => {
-		if (!isEnabledForProject) return;
-		if (!config.checkOnMutation || config.reminderMode === "none") return;
-		const sourceA = clone.duplicationA.sourceId;
-		const sourceB = clone.duplicationB.sourceId;
-
-		const relA = (
-			path.isAbsolute(sourceA) && currentCwd
-				? path.relative(currentCwd, sourceA)
-				: sourceA
-		).replace(/\\/g, "/");
-
-		const relB = (
-			path.isAbsolute(sourceB) && currentCwd
-				? path.relative(currentCwd, sourceB)
-				: sourceB
-		).replace(/\\/g, "/");
-
-		// Determine if either file is one that was recently mutated in the active session
-		const targetRel = fileRevisions.has(relA)
-			? relA
-			: fileRevisions.has(relB)
-				? relB
-				: undefined;
-
-		if (!targetRel) return;
-		const targetRanges = fileChangedRanges.get(targetRel);
-		if (targetRanges) {
-			const isIntraFile = relA === relB;
-			const intersects = isIntraFile
-				? cloneIntersectsRanges(clone, targetRanges, "duplicationA") ||
-					cloneIntersectsRanges(clone, targetRanges, "duplicationB")
-				: cloneIntersectsRanges(
-						clone,
-						targetRanges,
-						targetRel === relB ? "duplicationB" : "duplicationA",
-					);
-			if (!intersects) return;
-		}
-
-		const freshClones = ledger.filterFreshClones(
-			targetRel,
-			[clone],
-			currentCwd,
-		);
-		if (freshClones.length > 0) {
-			const fullPath = path.isAbsolute(targetRel)
-				? targetRel
-				: path.join(currentCwd, targetRel);
-			let content: string | undefined;
-			try {
-				const file = Bun.file(fullPath);
-				if (await file.exists()) {
-					content = await file.text();
-				}
-			} catch {}
-
-			const reminder = ledger.formatReminder(freshClones, targetRel, content);
-			pi.logger.info("Late clone finding surfaced for file mutation", {
-				file: targetRel,
-				cloneCount: freshClones.length,
-			});
-
-			if (
-				config.reminderMode === "steer" ||
-				config.reminderMode === "in-band"
-			) {
-				pi.sendMessage(
-					{
-						customType: "duplicate-detector-warning",
-						content: reminder,
-						display: true,
-						attribution: "user",
-						details: {
-							filePath: targetRel,
-							clones: freshClones,
-							content,
-						},
-					},
-					{ deliverAs: "steer" },
-				);
-			}
-		}
-	});
-
-	// Session lifecycle: reset on switch and branch
-	pi.on("session_switch", async (event, ctx) => {
-		ledger.clear();
-		fileRevisions.clear();
-		fileChangedRanges.clear();
-		preMutationContent.clear();
-		workerFailureNotified = false;
-		lastKnownHead = null;
-		if (ctx?.cwd) {
-			currentCwd = ctx.cwd;
-			execGit(["rev-parse", "HEAD"], ctx.cwd)
-				.then(({ stdout }) => {
-					lastKnownHead = stdout.trim() || null;
-				})
-				.catch(() => {
-					lastKnownHead = null;
-				});
-		}
-		lastCtx = ctx as ExtensionContext;
-		activeRawSettings = extractSettingsObject(event, ctx);
-		config = resolveConfig(activeRawSettings, null);
-		const projectConfig = ctx?.cwd
-			? await findProjectJscpdConfig(ctx.cwd)
-			: null;
-		if (projectConfig) {
-			config = resolveConfig(activeRawSettings, projectConfig);
-		}
-		if (ctx?.cwd) {
-			isEnabledForProject = await isProjectEnabled(ctx.cwd);
-			if (!isEnabledForProject) {
-				pi.logger.info("Duplicate detector is disabled for this project", {
-					cwd: ctx.cwd,
-				});
-				notifyBaselineStatus(pi, lastCtx, "disabled", 0);
-				return;
-			}
-
-			try {
-				await coordinator.openWorkspace(ctx.cwd, config);
-			} catch (err) {
-				notifyWorkerFailure(err);
-			}
-		}
-	});
-
-	pi.on("session_branch", async () => {
-		ledger.clear();
-		fileRevisions.clear();
-		fileChangedRanges.clear();
-		preMutationContent.clear();
-	});
-
-	pi.on("session_shutdown", async () => {
-		await coordinator.dispose();
-	});
-
-	if (typeof process !== "undefined" && typeof process.on === "function") {
-		process.once("beforeExit", () => {
-			coordinator.dispose().catch(() => {});
-		});
+		];
 	}
-
-	// Trigger parent git reconciliation on turn start
-	pi.on("before_agent_start", async (_event, ctx) => {
-		if (ctx?.cwd) {
-			await reconcileParentGitState(ctx.cwd);
-		}
-	});
-
-	// Initialize repository index in background on session start (non-blocking)
-	pi.on("session_start", async (event, ctx) => {
-		currentCwd = ctx.cwd;
-		lastCtx = ctx as ExtensionContext;
-		fileRevisions.clear();
-		workerFailureNotified = false;
-
-		execGit(["rev-parse", "HEAD"], ctx.cwd)
-			.then(({ stdout }) => {
-				lastKnownHead = stdout.trim() || null;
-			})
-			.catch(() => {
-				lastKnownHead = null;
-			});
-		pi.logger.debug("Duplicate detector initializing workspace index", {
-			cwd: ctx.cwd,
-		});
-
-		activeRawSettings = extractSettingsObject(event, ctx);
-		config = resolveConfig(activeRawSettings, null);
-		const projectConfig = await findProjectJscpdConfig(ctx.cwd);
-		if (projectConfig) {
-			config = resolveConfig(activeRawSettings, projectConfig);
-		}
-		if (config.configSource) {
-			pi.logger.info("Duplicate detector loaded project configuration", {
-				source: config.configSource,
-				minLines: config.minLines,
-				minTokens: config.minTokens,
-				ignoreCount: config.ignorePatterns.length,
-			});
-		}
-
-		isEnabledForProject = await isProjectEnabled(ctx.cwd);
-		if (!isEnabledForProject) {
-			pi.logger.info("Duplicate detector is disabled for this project", {
-				cwd: ctx.cwd,
-			});
-			notifyBaselineStatus(pi, lastCtx, "disabled", 0);
-			return;
-		}
-
-		try {
-			await coordinator.openWorkspace(ctx.cwd, config);
-		} catch (err) {
-			pi.logger.warn("Duplicate detector background indexing failed", {
-				error: err instanceof Error ? err.message : String(err),
-			});
-			notifyWorkerFailure(err);
-		}
-	});
-
-	// Intercept write and edit tool executions to detect clones in newly added/modified code
-	// Pre-capture file content before write or edit mutation so diff calculation on tool_result
-	// knows exactly which line ranges were newly introduced vs pre-existing.
-	pi.on("tool_call", async (event, ctx) => {
-		if (event.toolName !== "write" && event.toolName !== "edit") return;
-		const rawPath = extractPathFromToolInput(event.input);
-		if (!rawPath || rawPath.includes("://")) return;
-		const fullPath = path.isAbsolute(rawPath)
-			? path.resolve(rawPath)
-			: path.resolve(ctx.cwd, rawPath);
-		try {
-			const file = Bun.file(fullPath);
-			if (await file.exists()) {
-				preMutationContent.set(fullPath, await file.text());
-			} else {
-				preMutationContent.set(fullPath, null);
-			}
-		} catch {
-			preMutationContent.set(fullPath, null);
-		}
-	});
-
-	pi.on(
-		"tool_result",
-		async (event, ctx): Promise<ToolResultEventResult | void> => {
-			let capturedOldContent: string | null | undefined;
-			let resolvedFullPath: string | undefined;
-
-			if (event.toolName === "write" || event.toolName === "edit") {
-				const rawPath = extractPathFromToolInput(event.input);
-				if (rawPath && !rawPath.includes("://") && ctx?.cwd) {
-					resolvedFullPath = path.isAbsolute(rawPath)
-						? path.resolve(rawPath)
-						: path.resolve(ctx.cwd, rawPath);
-					capturedOldContent = preMutationContent.get(resolvedFullPath);
-					preMutationContent.delete(resolvedFullPath);
-				}
-			}
-
-			if (event.isError) return;
-			if (!isEnabledForProject) return;
-			if (!config.checkOnMutation) return;
-			if (config.reminderMode === "none") return;
-			if (event.toolName === "task" || event.toolName === "bash") {
-				await reconcileParentGitState(ctx.cwd);
-				return;
-			}
-			if (event.toolName !== "write" && event.toolName !== "edit") return;
-			if (!resolvedFullPath) return;
-
-			const fullPath = resolvedFullPath;
-			const relPath = path.relative(ctx.cwd, fullPath);
-			const normalizedRelPath = relPath.replace(/\\/g, "/");
-
-			// If the mutated file is outside the workspace root or invalid, skip it
-			if (
-				!normalizedRelPath ||
-				normalizedRelPath === ".." ||
-				normalizedRelPath.startsWith("../") ||
-				path.isAbsolute(normalizedRelPath)
-			) {
-				return;
-			}
-			try {
-				// Skip ignored files (matching ignore patterns, noise files, or test files)
-				const ignoreFilter = createIgnoreFilter(config.ignorePatterns, {
-					ignoreTests: config.ignoreTests,
-					customTestPatterns: config.customTestPatterns,
-					excludeTestPatterns: config.excludeTestPatterns,
-				});
-				if (ignoreFilter(normalizedRelPath)) return;
-				const file = Bun.file(fullPath);
-				if (!(await file.exists())) return;
-
-				const content = await file.text();
-
-				// Skip generated files
-				if (isGeneratedContent(content)) return;
-
-				let oldContent = capturedOldContent;
-				if (oldContent === undefined && ctx?.cwd) {
-					try {
-						const isGit = await isInsideGitWorkTree(ctx.cwd);
-						if (isGit) {
-							const { stdout } = await execGit(
-								["show", `HEAD:${normalizedRelPath}`],
-								ctx.cwd,
-							);
-							oldContent = stdout;
-						} else {
-							oldContent = null;
-						}
-					} catch {
-						oldContent = null;
-					}
-				}
-
-				const changedRanges = computeChangedLineRanges(oldContent, content);
-				fileChangedRanges.set(normalizedRelPath, changedRanges);
-
-				const revision = (fileRevisions.get(normalizedRelPath) ?? 0) + 1;
-				fileRevisions.set(normalizedRelPath, revision);
-
-				const { clones } = await coordinator.checkAndUpdate(
-					fullPath,
-					content,
-					revision,
-				);
-				const mutatingClones = clones.filter((c) => {
-					if (cloneIntersectsRanges(c, changedRanges, "duplicationA")) {
-						return true;
-					}
-					const isIntraFile =
-						c.duplicationA.sourceId === c.duplicationB.sourceId ||
-						path.resolve(c.duplicationA.sourceId) ===
-							path.resolve(c.duplicationB.sourceId);
-					return (
-						isIntraFile &&
-						cloneIntersectsRanges(c, changedRanges, "duplicationB")
-					);
-				});
-				const freshClones = ledger.filterFreshClones(
-					normalizedRelPath,
-					mutatingClones,
-					currentCwd,
-				);
-
-				if (freshClones.length > 0) {
-					const fullReminder = ledger.formatReminder(
-						freshClones,
-						normalizedRelPath,
-						content,
-						undefined,
-						{ maxClones: 0, maxSnippetLines: 0 },
-					);
-
-					let artifactId: string | undefined;
-					const fullBytes = Buffer.byteLength(fullReminder, "utf-8");
-					const needsTruncation =
-						freshClones.length > 4 || fullBytes > 8 * 1024;
-
-					if (needsTruncation && ctx?.sessionManager?.saveArtifact) {
-						try {
-							artifactId = await ctx.sessionManager.saveArtifact(
-								fullReminder,
-								"duplicates",
-							);
-						} catch (err) {
-							pi.logger.warn(
-								"Failed to persist mutation duplicate warning to session artifact",
-								{
-									error: err instanceof Error ? err.message : String(err),
-								},
-							);
-						}
-					}
-
-					const reminder = ledger.formatReminder(
-						freshClones,
-						normalizedRelPath,
-						content,
-						undefined,
-						{
-							maxClones: 4,
-							maxSnippetLines: 8,
-							artifactId,
-						},
-					);
-
-					pi.logger.info("Duplicates detected on file mutation", {
-						file: normalizedRelPath,
-						count: freshClones.length,
-						artifactId,
-					});
-
-					if (config.reminderMode === "steer") {
-						pi.sendMessage(
-							{
-								customType: "duplicate-detector-warning",
-								content: reminder,
-								display: true,
-								attribution: "user",
-								details: {
-									filePath: normalizedRelPath,
-									clones: freshClones,
-									content,
-									artifactId,
-								},
-							},
-							{ deliverAs: "steer" },
-						);
-						return;
-					}
-
-					// Prepend <system-reminder> to tool result content for in-band display
-					const originalContent = Array.isArray(event.content)
-						? (event.content as Array<{ type: "text"; text: string }>)
-						: [{ type: "text" as const, text: String(event.content ?? "") }];
-
-					const modifiedContent = [
-						{ type: "text" as const, text: reminder },
-						...originalContent,
-					];
-
-					return {
-						content: modifiedContent,
-					};
-				}
-			} catch (err) {
-				pi.logger.warn("Failed checking duplicates for mutated file", {
-					file: normalizedRelPath,
-					error: err instanceof Error ? err.message : String(err),
-				});
-				notifyWorkerFailure(err);
-			}
-		},
-	);
-	// Register /duplicates slash command
-	pi.registerCommand("duplicates", {
-		description:
-			"Toggle duplicate detector on or off for this project (/duplicates on|off)",
-		getArgumentCompletions: (prefix) => {
-			const options = ["on", "off", "status"];
-			return options
-				.filter((opt) => opt.startsWith(prefix.toLowerCase()))
-				.map((label) => ({
-					value: label,
-					label,
-					description:
-						label === "on"
-							? "Enable duplicate detection for this project"
-							: label === "off"
-								? "Disable duplicate detection for this project"
-								: "Check duplicate detection status for this project",
-				}));
-		},
-		handler: async (args, ctx) => {
-			const action = args.trim().toLowerCase();
-			if (action === "on") {
-				await setProjectEnabled(ctx.cwd, true);
-				isEnabledForProject = true;
-				ctx.ui.notify("Duplicate detector enabled for this project.", "info");
-				try {
-					await coordinator.openWorkspace(ctx.cwd, config);
-				} catch (err) {
-					notifyWorkerFailure(err);
-				}
-			} else if (action === "off") {
-				await setProjectEnabled(ctx.cwd, false);
-				isEnabledForProject = false;
-				ledger.clear();
-				fileRevisions.clear();
-				fileChangedRanges.clear();
-				preMutationContent.clear();
-				ctx.ui.notify("Duplicate detector disabled for this project.", "info");
-				notifyBaselineStatus(pi, ctx as ExtensionContext, "disabled", 0);
-			} else if (action === "status" || action === "") {
-				const enabled = await isProjectEnabled(ctx.cwd);
-				ctx.ui.notify(
-					`Duplicate detector is currently ${enabled ? "enabled" : "disabled"} for this project. Usage: /duplicates on|off`,
-					"info",
-				);
-			} else {
-				ctx.ui.notify(
-					`Unknown argument "${args.trim()}". Usage: /duplicates on|off`,
-					"error",
-				);
-			}
-		},
-	});
-
-	// Register TTSR-styled message renderers for duplicate alerts and reports
-	if (typeof pi.registerMessageRenderer === "function") {
-		pi.registerMessageRenderer<DuplicateNotificationData>(
-			"duplicate-detector-warning",
-			(message, options, theme) => {
-				const data = message.details || {
-					content:
-						typeof message.content === "string" ? message.content : undefined,
-				};
-				return new DuplicateNotificationComponent(
-					data,
-					options?.expanded ?? false,
-					theme as ThemeLike,
-				);
-			},
+	if (event.toolName === "edit")
+		return editRequests(
+			event.details as EditToolDetails | undefined,
+			event.input,
+			cwd,
 		);
-
-		pi.registerMessageRenderer<DuplicateNotificationData>(
-			"duplicate-detector-report",
-			(message, options, theme) => {
-				const data = message.details || {
-					content:
-						typeof message.content === "string" ? message.content : undefined,
-				};
-				return new DuplicateNotificationComponent(
-					data,
-					options?.expanded ?? false,
-					theme as ThemeLike,
-				);
-			},
-		);
-
-		pi.registerMessageRenderer<DuplicateStatusData>(
-			"duplicate-detector-status",
-			(message, _options, theme) => {
-				const data = message.details || {
-					content:
-						typeof message.content === "string" ? message.content : undefined,
-				};
-				return new DuplicateStatusComponent(data, theme as ThemeLike);
-			},
-		);
-	}
+	return undefined;
 }
+
+function isMainWithUi(ctx: ExtensionContext): boolean {
+	return ctx.hasUI && ctx.agent?.kind === "main";
+}
+
+function describeStatus(status: WorkspaceStatus): string {
+	const files =
+		status.candidateFiles !== undefined
+			? `${status.indexedFiles}/${status.candidateFiles} files`
+			: `${status.indexedFiles} files`;
+	const capped = status.capped ? " (capped by maxIndexedFiles)" : "";
+	const message = status.message ? ` — ${status.message}` : "";
+	return `${status.state}, ${files} indexed${capped}${message}`;
+}
+
+function errorText(err: unknown): string {
+	return err instanceof Error ? err.message : String(err);
+}
+
+export function createDuplicateDetector(
+	deps: ExtensionDeps,
+): (pi: ExtensionAPI) => void {
+	return (pi) => {
+		const logger = pi.logger;
+		const stateOptions = { cacheDir: deps.cacheDir, logger };
+		const ledger = new WarningLedger();
+		/** `write` pre-images by toolCallId, captured in tool_call. */
+		const befores = new Map<string, CapturedBefore>();
+		/** Bumped by every (re)start and stop; stale async work compares against it. */
+		let generation = 0;
+		let workspace: ActiveWorkspace | undefined;
+		/** Settles when the latest start attempt finished (acquired, disabled, or failed). */
+		let starting: Promise<void> = Promise.resolve();
+		let failureNotified = false;
+
+		const reportFailure = (ctx: ExtensionContext, message: string): void => {
+			logger.warn("duplicate-detector: workspace failed", {
+				cwd: ctx.cwd,
+				error: message,
+			});
+			if (failureNotified) return;
+			failureNotified = true;
+			if (isMainWithUi(ctx))
+				ctx.ui.notify(`Duplicate detector failed: ${message}`, "error");
+		};
+
+		const reportStatus = (
+			ctx: ExtensionContext,
+			status: WorkspaceStatus,
+		): void => {
+			if (status.state === "failed")
+				reportFailure(ctx, status.message ?? "unknown error");
+			else failureNotified = false;
+			if (!isMainWithUi(ctx)) return;
+			const text =
+				status.state === "indexing"
+					? `dup: indexing ${status.indexedFiles}${status.candidateFiles !== undefined ? `/${status.candidateFiles}` : ""}`
+					: undefined;
+			ctx.ui.setStatus(STATUS_KEY, text);
+		};
+
+		const releaseHandle = async (current: ActiveWorkspace): Promise<void> => {
+			current.unsubscribe();
+			try {
+				await current.handle.release();
+			} catch (err) {
+				logger.warn("duplicate-detector: workspace release failed", {
+					error: errorText(err),
+				});
+			}
+		};
+
+		const releaseWorkspace = async (ctx: ExtensionContext): Promise<void> => {
+			const current = workspace;
+			workspace = undefined;
+			if (!current) return;
+			if (isMainWithUi(ctx)) ctx.ui.setStatus(STATUS_KEY, undefined);
+			await releaseHandle(current);
+		};
+
+		const loadSettings = async (
+			cwd: string,
+		): Promise<Record<string, unknown>> => {
+			try {
+				return await deps.loadPluginSettings(cwd);
+			} catch (err) {
+				logger.warn(
+					"duplicate-detector: failed to load plugin settings, using defaults",
+					{ error: errorText(err) },
+				);
+				return {};
+			}
+		};
+
+		const start = async (ctx: ExtensionContext): Promise<void> => {
+			const gen = ++generation;
+			try {
+				const enabled = await isProjectEnabled(ctx.cwd, stateOptions);
+				if (gen !== generation) return;
+				if (!enabled) {
+					await releaseWorkspace(ctx);
+					return;
+				}
+				const [root, pluginSettings] = await Promise.all([
+					resolveProjectRoot(ctx.cwd),
+					loadSettings(ctx.cwd),
+				]);
+				const config = await resolveConfig({
+					cwd: ctx.cwd,
+					root,
+					pluginSettings,
+					logger,
+				});
+				if (gen !== generation) return;
+				// Acquire before releasing the previous handle: with the same root and options the
+				// service shares the workspace, so its refcount never hits zero and the index stays warm.
+				const handle = await acquireWorkspace(ctx.cwd, config.options);
+				if (gen !== generation) {
+					await handle.release();
+					return;
+				}
+				const previous = workspace;
+				const unsubscribe = handle.onStatus((status) =>
+					reportStatus(ctx, status),
+				);
+				workspace = { handle, config, unsubscribe };
+				reportStatus(ctx, handle.status());
+				if (previous) await releaseHandle(previous);
+			} catch (err) {
+				if (gen !== generation) return;
+				reportFailure(ctx, errorText(err));
+				await releaseWorkspace(ctx);
+			}
+		};
+
+		const restart = (ctx: ExtensionContext): Promise<void> => {
+			starting = start(ctx);
+			return starting;
+		};
+
+		const stop = async (ctx: ExtensionContext): Promise<void> => {
+			generation++;
+			befores.clear();
+			ledger.clear();
+			await releaseWorkspace(ctx);
+		};
+
+		const sendWarning = (ctx: ExtensionContext, reminder: Reminder): void => {
+			pi.sendMessage(
+				{
+					customType: WARNING_MESSAGE_TYPE,
+					content: reminder.text,
+					display: true,
+					details: reminder.details,
+				},
+				// Streaming: `aside` reaches the model at the next step boundary without cutting the
+				// running tool batch short (`steer` would). Idle: join the context for the next turn
+				// instead of starting an autonomous one.
+				{ deliverAs: ctx.isIdle() ? "nextTurn" : "aside" },
+			);
+		};
+
+		/** Check one mutation; resolves to a reminder for duplicates not reported before. */
+		const warnFor = async (
+			ctx: ExtensionContext,
+			active: ActiveWorkspace,
+			request: CheckRequest,
+		): Promise<Reminder | undefined> => {
+			try {
+				const result = await active.handle.check(request);
+				if (result.status !== "checked") return undefined;
+				const fresh = ledger.filterNew(result.matches);
+				if (fresh.length === 0) return undefined;
+				return await buildReminder({
+					root: active.handle.root,
+					file: fresh[0]!.region.file,
+					matches: fresh,
+					saveArtifact: (content) =>
+						ctx.sessionManager.saveArtifact(content, "duplicate-detector"),
+				});
+			} catch (err) {
+				// check() rejects only once the handle was released (session ended or detection turned off).
+				if (workspace === active)
+					logger.warn("duplicate-detector: check failed", {
+						error: errorText(err),
+					});
+				return undefined;
+			}
+		};
+
+		pi.registerMessageRenderer(WARNING_MESSAGE_TYPE, createWarningRenderer());
+
+		pi.on("session_start", async (_event, ctx) => {
+			if (!legacyCleanupStarted) {
+				legacyCleanupStarted = true;
+				void removeLegacyCacheFiles(deps.cacheDir);
+			}
+			await restart(ctx);
+		});
+
+		pi.on("session_switch", async (_event, ctx) => {
+			befores.clear();
+			ledger.clear();
+			await restart(ctx);
+		});
+
+		pi.on("session_branch", () => {
+			ledger.clear();
+		});
+
+		pi.on("session_tree", () => {
+			ledger.clear();
+		});
+
+		pi.on("session_shutdown", async (_event, ctx) => {
+			await stop(ctx);
+		});
+
+		pi.on("before_agent_start", () => {
+			workspace?.handle.refresh();
+		});
+
+		pi.on("tool_call", async (event, ctx) => {
+			if (event.toolName !== "write") return;
+			// Bounded: omp blocks the call when a tool_call handler stalls. A start still pending
+			// after the wait may yet enable detection, so capture anyway.
+			let started = false;
+			const wait = Promise.withResolvers<void>();
+			const timer = setTimeout(wait.resolve, START_WAIT_MS);
+			await Promise.race([
+				starting.then(() => {
+					started = true;
+				}),
+				wait.promise,
+			]);
+			clearTimeout(timer);
+			if (started && !workspace) return;
+			const target = resolveToolPath(
+				ctx.cwd,
+				(event.input as Record<string, unknown>).path,
+			);
+			if (!target) return;
+			const content = await readBefore(target);
+			if (befores.size >= MAX_PENDING_BEFORES) {
+				const oldest = befores.keys().next();
+				if (!oldest.done) befores.delete(oldest.value);
+			}
+			befores.set(event.toolCallId, { path: target, content });
+		});
+
+		pi.on("tool_result", async (event, ctx) => {
+			const before = befores.get(event.toolCallId);
+			befores.delete(event.toolCallId);
+			await starting;
+			const active = workspace;
+			if (!active) return;
+			const requests = mutationRequests(event, ctx.cwd, before);
+			if (requests === undefined || event.isError) {
+				// Out-of-band or partially applied changes: let the rescan pick them up.
+				if (!READ_ONLY_TOOLS.has(event.toolName)) active.handle.refresh();
+				return;
+			}
+			if (requests.length === 0) return;
+
+			const gen = generation;
+			const inBand = active.config.settings.reminderMode === "in-band";
+			const onTime: Reminder[] = [];
+			let inTime = true;
+			const deliverLate = (reminder: Reminder): void => {
+				if (gen === generation) sendWarning(ctx, reminder);
+			};
+			const tracked = requests.map((request) =>
+				warnFor(ctx, active, request).then((reminder) => {
+					if (!reminder) return;
+					if (inTime) onTime.push(reminder);
+					else deliverLate(reminder);
+				}),
+			);
+			const budget = Promise.withResolvers<void>();
+			const timer = ctx.setTimeout(() => budget.resolve(), CHECK_BUDGET_MS);
+			await Promise.race([Promise.all(tracked), budget.promise]);
+			inTime = false;
+			ctx.clearTimer(timer);
+			if (onTime.length === 0 || gen !== generation) return;
+			if (inBand)
+				return {
+					additionalContext: onTime
+						.map((reminder) => reminder.text)
+						.join("\n\n"),
+				};
+			for (const reminder of onTime) sendWarning(ctx, reminder);
+		});
+
+		pi.registerCommand("duplicates", {
+			description:
+				"Duplicate detector for this project: /duplicates on|off|status",
+			getArgumentCompletions: (prefix) =>
+				[
+					{
+						value: "on",
+						label: "on",
+						description: "Enable duplicate detection for this project",
+					},
+					{
+						value: "off",
+						label: "off",
+						description: "Disable duplicate detection for this project",
+					},
+					{
+						value: "status",
+						label: "status",
+						description: "Show duplicate detection status",
+					},
+				].filter((item) => item.value.startsWith(prefix.trim().toLowerCase())),
+			handler: async (args, ctx) => {
+				const action = args.trim().toLowerCase();
+				try {
+					if (action === "on") {
+						await setProjectEnabled(ctx.cwd, true, stateOptions);
+						await restart(ctx);
+						ctx.ui.notify(
+							"Duplicate detector enabled for this project.",
+							"info",
+						);
+					} else if (action === "off") {
+						await setProjectEnabled(ctx.cwd, false, stateOptions);
+						await stop(ctx);
+						ctx.ui.notify(
+							"Duplicate detector disabled for this project.",
+							"info",
+						);
+					} else if (action === "status" || action === "") {
+						await starting;
+						const enabled = await isProjectEnabled(ctx.cwd, stateOptions);
+						const detail = workspace
+							? `${describeStatus(workspace.handle.status())}; root ${workspace.handle.root}; reminders: ${workspace.config.settings.reminderMode}`
+							: "not running";
+						ctx.ui.notify(
+							`Duplicate detector is ${enabled ? "enabled" : "disabled"} for this project (${detail}).`,
+							"info",
+						);
+					} else {
+						ctx.ui.notify(
+							`Unknown argument "${args.trim()}". Usage: /duplicates on|off|status`,
+							"error",
+						);
+					}
+				} catch (err) {
+					ctx.ui.notify(`Duplicate detector: ${errorText(err)}`, "error");
+				}
+			},
+		});
+	};
+}
+
+const duplicateDetector = createDuplicateDetector({
+	loadPluginSettings: (cwd) => getPluginSettings(PLUGIN_NAME, cwd),
+});
+
+/** @public omp extension entry point. */
+export default duplicateDetector;

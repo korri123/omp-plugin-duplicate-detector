@@ -1,180 +1,183 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { execGit } from "../src/jscpd-engine";
 import {
-	getProjectsStateFilePath,
 	isProjectEnabled,
-	loadProjectsState,
-	normalizeProjectPath,
-	saveProjectsState,
+	removeLegacyCacheFiles,
+	resolveProjectRoot,
 	setProjectEnabled,
 } from "../src/project-state";
 
-describe("Project State & Persistence", () => {
-	let tempCacheDir: string;
+async function git(cwd: string, ...args: string[]): Promise<void> {
+	const proc = Bun.spawn(["git", ...args], {
+		cwd,
+		stdout: "ignore",
+		stderr: "ignore",
+	});
+	expect(await proc.exited).toBe(0);
+}
+
+describe("project state", () => {
+	let dir: string;
+	let cacheDir: string;
+	let repo: string;
+	const warnings: string[] = [];
+	const logger = { warn: (message: string) => void warnings.push(message) };
 
 	beforeEach(async () => {
-		tempCacheDir = path.join(
-			os.tmpdir(),
-			`omp-dup-test-cache-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+		dir = await fs.realpath(
+			await fs.mkdtemp(path.join(os.tmpdir(), "dd-state-")),
 		);
-		await fs.mkdir(tempCacheDir, { recursive: true });
+		cacheDir = path.join(dir, "cache");
+		repo = path.join(dir, "repo");
+		await fs.mkdir(path.join(repo, "src"), { recursive: true });
+		await git(repo, "init", "-q");
+		warnings.length = 0;
 	});
 
 	afterEach(async () => {
-		try {
-			await fs.rm(tempCacheDir, { recursive: true, force: true });
-		} catch {}
+		await fs.rm(dir, { recursive: true, force: true });
 	});
 
-	describe("normalizeProjectPath", () => {
-		it("normalizes relative paths and trailing slashes", () => {
-			const p1 = normalizeProjectPath("./src/../src");
-			const p2 = normalizeProjectPath("./src");
-			expect(p1).toBe(p2);
+	it("defaults to enabled and persists per repository", async () => {
+		expect(await isProjectEnabled(repo, { cacheDir, logger })).toBe(true);
+		await setProjectEnabled(path.join(repo, "src"), false, {
+			cacheDir,
+			logger,
 		});
+		expect(await isProjectEnabled(repo, { cacheDir, logger })).toBe(false);
 
-		it("returns canonical absolute path", () => {
-			const cwd = process.cwd();
-			expect(normalizeProjectPath(cwd)).toBe(path.resolve(cwd));
+		const other = path.join(dir, "other");
+		await fs.mkdir(other);
+		expect(await isProjectEnabled(other, { cacheDir, logger })).toBe(true);
+
+		const saved = JSON.parse(
+			await fs.readFile(path.join(cacheDir, "projects.json"), "utf8"),
+		);
+		expect(saved.projects[path.join(repo, ".git")]).toMatchObject({
+			enabled: false,
+			displayPath: repo,
 		});
+		expect(
+			(await fs.readdir(cacheDir)).filter((name) => name.endsWith(".tmp")),
+		).toEqual([]);
 	});
 
-	describe("getProjectsStateFilePath", () => {
-		it("returns projects.json in specified cache dir", () => {
-			const filePath = getProjectsStateFilePath(tempCacheDir);
-			expect(filePath).toBe(path.join(tempCacheDir, "projects.json"));
-		});
+	it("shares the state with linked worktrees", async () => {
+		await git(
+			repo,
+			"-c",
+			"user.name=t",
+			"-c",
+			"user.email=t@t",
+			"commit",
+			"-q",
+			"--allow-empty",
+			"-m",
+			"init",
+		);
+		const linked = path.join(dir, "linked");
+		await git(repo, "worktree", "add", "-q", "--detach", linked);
+		expect(await resolveProjectRoot(linked)).toBe(linked);
+
+		await setProjectEnabled(linked, false, { cacheDir, logger });
+		expect(await isProjectEnabled(repo, { cacheDir, logger })).toBe(false);
+		await setProjectEnabled(repo, true, { cacheDir, logger });
+		expect(await isProjectEnabled(linked, { cacheDir, logger })).toBe(true);
 	});
 
-	describe("loadProjectsState and saveProjectsState", () => {
-		it("returns empty default state when file does not exist", async () => {
-			const state = await loadProjectsState(tempCacheDir);
-			expect(state.version).toBe(1);
-			expect(state.projects).toEqual({});
-		});
+	it("maps an omp task isolation (detached copy borrowing objects via alternates) to its source repo", async () => {
+		// What omp's detachGitDir leaves behind: a fresh repo whose alternates name the source object store.
+		const isolation = path.join(dir, "wt", "t1234", "m");
+		await fs.mkdir(path.join(isolation, "src"), { recursive: true });
+		await git(isolation, "init", "-q");
+		await Bun.write(
+			path.join(isolation, ".git", "objects", "info", "alternates"),
+			`${path.join(repo, ".git", "objects")}\n`,
+		);
 
-		it("returns empty default state when file is corrupted JSON", async () => {
-			const filePath = getProjectsStateFilePath(tempCacheDir);
-			await Bun.write(filePath, "INVALID_JSON{{{{");
-			const state = await loadProjectsState(tempCacheDir);
-			expect(state.version).toBe(1);
-			expect(state.projects).toEqual({});
-		});
+		await setProjectEnabled(repo, false, { cacheDir, logger });
+		expect(
+			await isProjectEnabled(path.join(isolation, "src"), { cacheDir, logger }),
+		).toBe(false);
+		expect(await resolveProjectRoot(isolation)).toBe(isolation);
+	});
 
-		it("returns empty default state when projects property is null or an array", async () => {
-			const filePath = getProjectsStateFilePath(tempCacheDir);
-			await Bun.write(filePath, JSON.stringify({ version: 1, projects: null }));
-			let state = await loadProjectsState(tempCacheDir);
-			expect(state.projects).toEqual({});
-
-			await Bun.write(
-				filePath,
-				JSON.stringify({ version: 1, projects: ["/workspace/proj"] }),
-			);
-			state = await loadProjectsState(tempCacheDir);
-			expect(state.projects).toEqual({});
-		});
-		it("saves and reloads project states accurately", async () => {
-			const initialState = {
+	it("honors and migrates entries keyed by the legacy repository hash", async () => {
+		const legacyKey = createHash("sha256")
+			.update(`git-object-dir\0${path.join(repo, ".git", "objects")}`)
+			.digest("hex")
+			.slice(0, 16);
+		const file = path.join(cacheDir, "projects.json");
+		await Bun.write(
+			file,
+			JSON.stringify({
 				version: 1,
-				projects: {
-					"/workspace/project-a": {
-						enabled: false,
-						updatedAt: "2026-08-24T00:00:00.000Z",
-					},
-					"/workspace/project-b": {
-						enabled: true,
-						updatedAt: "2026-08-24T01:00:00.000Z",
-					},
-				},
-			};
+				projects: { [legacyKey]: { enabled: false } },
+			}),
+		);
+		expect(await isProjectEnabled(repo, { cacheDir, logger })).toBe(false);
 
-			await saveProjectsState(initialState, tempCacheDir);
-			const loaded = await loadProjectsState(tempCacheDir);
-
-			expect(loaded.projects["/workspace/project-a"]?.enabled).toBe(false);
-			expect(loaded.projects["/workspace/project-b"]?.enabled).toBe(true);
-		});
+		await setProjectEnabled(repo, false, { cacheDir, logger });
+		const saved = JSON.parse(await fs.readFile(file, "utf8"));
+		expect(Object.keys(saved.projects)).toEqual([path.join(repo, ".git")]);
 	});
 
-	describe("isProjectEnabled and setProjectEnabled", () => {
-		it("defaults to true for unknown projects", async () => {
-			const enabled = await isProjectEnabled(
-				"/workspace/unknown-project",
-				tempCacheDir,
-			);
-			expect(enabled).toBe(true);
-		});
+	it("keeps other projects' entries when writing", async () => {
+		await Bun.write(
+			path.join(cacheDir, "projects.json"),
+			JSON.stringify({
+				version: 1,
+				projects: { "/elsewhere": { enabled: false } },
+			}),
+		);
+		await setProjectEnabled(repo, false, { cacheDir, logger });
+		expect(await isProjectEnabled("/elsewhere", { cacheDir, logger })).toBe(
+			false,
+		);
+	});
 
-		it("toggles project to disabled and persists across reads", async () => {
-			const projectDir = "/workspace/my-cool-project";
-			await setProjectEnabled(projectDir, false, tempCacheDir);
+	it("reads a corrupt file as empty without rewriting it, and moves it aside before writing", async () => {
+		const file = path.join(cacheDir, "projects.json");
+		await Bun.write(file, "{not json");
+		expect(await isProjectEnabled(repo, { cacheDir, logger })).toBe(true);
+		expect(await fs.readFile(file, "utf8")).toBe("{not json");
+		expect(warnings.length).toBeGreaterThan(0);
 
-			const isNowEnabled = await isProjectEnabled(projectDir, tempCacheDir);
-			expect(isNowEnabled).toBe(false);
+		await setProjectEnabled(repo, false, { cacheDir, logger });
+		const names = await fs.readdir(cacheDir);
+		const backup = names.find((name) =>
+			name.startsWith("projects.json.corrupt-"),
+		);
+		expect(backup).toBeDefined();
+		expect(await fs.readFile(path.join(cacheDir, backup!), "utf8")).toBe(
+			"{not json",
+		);
+		expect(await isProjectEnabled(repo, { cacheDir, logger })).toBe(false);
+	});
 
-			// Verify file content on disk
-			const state = await loadProjectsState(tempCacheDir);
-			const normalized = normalizeProjectPath(projectDir);
-			const entry =
-				Object.values(state.projects).find(
-					(e) =>
-						e &&
-						typeof e === "object" &&
-						"displayPath" in e &&
-						e.displayPath === normalized,
-				) ?? state.projects[normalized];
-			expect(entry?.enabled).toBe(false);
-			expect(entry?.updatedAt).toBeDefined();
-		});
-		it("toggles project back to enabled", async () => {
-			const projectDir = "/workspace/my-cool-project";
-			await setProjectEnabled(projectDir, false, tempCacheDir);
-			expect(await isProjectEnabled(projectDir, tempCacheDir)).toBe(false);
-
-			await setProjectEnabled(projectDir, true, tempCacheDir);
-			expect(await isProjectEnabled(projectDir, tempCacheDir)).toBe(true);
-		});
-
-		it("maintains independent state per project without cross-contamination", async () => {
-			const proj1 = "/workspace/project-one";
-			const proj2 = "/workspace/project-two";
-
-			await setProjectEnabled(proj1, false, tempCacheDir);
-			await setProjectEnabled(proj2, true, tempCacheDir);
-
-			expect(await isProjectEnabled(proj1, tempCacheDir)).toBe(false);
-			expect(await isProjectEnabled(proj2, tempCacheDir)).toBe(true);
-		});
-
-		it("inherits project enablement across isolated CoW worktrees with alternates", async () => {
-			const primaryRepo = path.join(tempCacheDir, "primary-repo");
-			await fs.mkdir(primaryRepo, { recursive: true });
-			await execGit(["init", "-q"], primaryRepo);
-			const primaryObjects = path.join(primaryRepo, ".git", "objects");
-
-			const cowWorktree = path.join(tempCacheDir, ".omp", "wt", "t123456", "m");
-			await fs.mkdir(cowWorktree, { recursive: true });
-			await execGit(["init", "-q"], cowWorktree);
-			const cowObjectsInfo = path.join(cowWorktree, ".git", "objects", "info");
-			await fs.mkdir(cowObjectsInfo, { recursive: true });
-			await fs.writeFile(
-				path.join(cowObjectsInfo, "alternates"),
-				`${primaryObjects}\n`,
-			);
-			// Disable primary repo
-			await setProjectEnabled(primaryRepo, false, tempCacheDir);
-			expect(await isProjectEnabled(primaryRepo, tempCacheDir)).toBe(false);
-
-			// Isolated CoW worktree must inherit disabled state from primary
-			expect(await isProjectEnabled(cowWorktree, tempCacheDir)).toBe(false);
-
-			// Enabling from CoW worktree enables primary
-			await setProjectEnabled(cowWorktree, true, tempCacheDir);
-			expect(await isProjectEnabled(primaryRepo, tempCacheDir)).toBe(true);
-		});
+	it("removes legacy caches (sqlite files, shard dirs) but keeps everything else", async () => {
+		await fs.mkdir(cacheDir, { recursive: true });
+		const shard = "0123456789abcdef_fedcba9876543210";
+		for (const name of [
+			"a_v3.sqlite",
+			"a_v3.sqlite-wal",
+			"a_v3.sqlite-shm",
+			`${shard}/k1.bin`,
+			`${shard}/k2.json`,
+			"projects.json",
+			"notes.txt",
+			"keep_dir/x.bin",
+		]) {
+			await Bun.write(path.join(cacheDir, name), "x");
+		}
+		await removeLegacyCacheFiles(cacheDir);
+		expect((await fs.readdir(cacheDir)).sort()).toEqual([
+			"keep_dir",
+			"notes.txt",
+			"projects.json",
+		]);
 	});
 });

@@ -1,104 +1,100 @@
 # omp-plugin-duplicate-detector
 
-Real-time duplicate code detection for [oh-my-pi](https://github.com/can1357/oh-my-pi) (`omp`), built on [jscpd](https://github.com/kucherenko/jscpd).
+Duplicate code warnings for [oh-my-pi](https://github.com/can1357/oh-my-pi) (`omp`), using the [jscpd](https://github.com/kucherenko/jscpd) tokenizer.
 
 <img width="717" height="254" alt="image" src="https://github.com/user-attachments/assets/d4673964-1842-4a38-93de-72772edede98" />
 
-The plugin indexes your repository in the background and watches the agent as it works. When newly written or edited code duplicates existing logic anywhere in the workspace, the agent is warned immediately, before the copy-paste hardens into a maintenance problem. Duplicate detection can be toggled on or off per project using `/duplicates on|off`.
+The plugin indexes your repository in the background. When the agent's `write` or `edit` adds code that duplicates code already in the repository, the agent gets a warning that names both locations, so it can reuse or extract the existing code instead of copying it. Only duplication that the change itself introduced is reported. Duplicates that already existed are not.
 
-Indexing and mutation checks run entirely in a background worker with a persistent on-disk cache, so sessions start instantly and the agent loop is never blocked, even in large repositories.
 ## Installation
-
-Install directly via the `omp` CLI:
 
 ```bash
 omp plugin install omp-plugin-duplicate-detector
 ```
 
-On startup you'll see a short readiness note in the transcript, e.g. `Duplicate detector: Ready (1,420 Git files indexed, cached)`.
 ## Usage
 
-### Real-time warnings
+Detection is on by default for every Git repository. Each new duplicate is reported once per session, as follows:
 
-Enabled by default. Whenever the agent writes or edits a source file, the change is checked against the workspace index. If it duplicates existing code, a warning naming both locations is surfaced. How it's delivered is controlled by `reminderMode`:
+- **`steer`** (default): a warning card in the transcript, which also reaches the model at its next step. The running tool batch is not interrupted.
+- **`in-band`**: the warning is attached to the `write`/`edit` tool result as additional context. No card is shown.
 
-- **`steer`** (default) — shows a warning card in the terminal and steers the agent to reconsider before its next step.
-- **`in-band`** — appends a system reminder to the tool result instead.
-- **`none`** — disables real-time warnings; the index stays warm for on-demand scans.
+While the index is being built, a status-line item shows progress. If a check is still waiting when the tool result returns (because indexing hasn't finished), its warning arrives as soon as the check completes.
 
-Previously reported duplicates are remembered per session, so iterative edits to the same file don't repeat the same warning.
+Subagents get warnings too. All sessions in one omp process share one background worker and one index per repository.
 
-### `/duplicates` slash command
-
-Toggle duplicate detection on or off on a per-project basis. The preference is stored persistently in `~/.cache/omp/duplicate-detector/projects.json`.
+### `/duplicates`
 
 ```text
-/duplicates on                           # enable duplicate detector for this project
-/duplicates off                          # disable duplicate detector for this project
-/duplicates status                       # show current status for this project
+/duplicates on       # enable for this repository
+/duplicates off      # disable for this repository
+/duplicates status   # state, indexed file count, root, reminder mode
 ```
+
+The setting is stored per repository in `~/.cache/omp/duplicate-detector/projects.json` (or under `$XDG_CACHE_HOME`). Linked worktrees and omp task isolations use the setting of the repository they come from.
+
 ## Configuration
 
-Plugin settings (via the extension's `settings` in your omp config):
+Plugin settings (`omp plugin config set omp-plugin-duplicate-detector <key> <value>`, or per project in `.omp/plugin-overrides.json`):
 
 | Setting | Default | Description |
 |---|---|---|
-| `minLines` | `5` | Minimum consecutive lines to report as a duplicate |
-| `minTokens` | `40` | Minimum token count for a duplicate block |
-| `maxLines` | `500` | Maximum line count for a duplicate block |
-| `checkOnMutation` | `true` | Real-time checks on `write` / `edit` |
-| `reminderMode` | `"steer"` | `"steer"`, `"in-band"`, or `"none"` |
-| `ignorePatterns` | — | Glob patterns to exclude (array, or comma-separated string) |
-| `ignoreTests` | `true` | Automatically ignore test files, test directories, mocks, and fixtures across languages |
-| `customTestPatterns` | — | Additional glob patterns or substrings to treat as test files |
-| `excludeTestPatterns` | — | Patterns to exclude from test detection (un-ignore, keeping them as production code) |
-| `formatsExts` | — | Custom mapping of formats to file extensions (e.g. `{ "markdown": ["md", "mdx"] }`) |
-| `maxIndexedFiles` | `10000` | Cap on files indexed during the baseline scan |
+| `minTokens` | `40` | Minimum duplicated tokens to report |
+| `minLines` | `5` | Minimum duplicated lines (in the edited file) to report |
+| `reminderMode` | `"steer"` | `"steer"` or `"in-band"` |
+| `ignorePatterns` | — | Extra gitignore-style patterns, comma-separated (commas inside `{…}` are kept) |
+| `ignoreTests` | `true` | Skip test files, test directories, mocks, fixtures, and snapshots |
+| `maxIndexedFiles` | `10000` | Maximum number of files in the index |
 
 ### Project configuration
 
-Standard `jscpd` configuration is discovered automatically — `.jscpd.json` and its `.jscpd.rc*` / `.config/` variants, or a `"jscpd"` key in `package.json`:
+The plugin also reads standard jscpd configuration: `.jscpd.json`, the `.jscpd.rc*` and `.jscpd.y(a)ml` variants, the `.config/` variants, or a `"jscpd"` key in `package.json`. It looks in the working directory and each parent up to the repository root. Recognized keys:
 
 ```json
 {
   "minLines": 6,
   "minTokens": 50,
-  "ignore": ["vendor/**", "build/**"],
+  "ignore": ["generated/**"],
   "ignoreTests": true,
   "customTestPatterns": ["**/custom_fixtures/**"],
-  "excludeTestPatterns": ["**/src/services/test-utils-in-prod.ts"],
-  "formatsExts": {
-    "yaml": ["yml", "yaml"],
-    "markdown": ["md", "mdx"]
-  }
+  "excludeTestPatterns": ["src/services/test-utils-in-prod.ts"],
+  "formatsExts": { "markdown": ["md", "mdx"] }
 }
 ```
 
-## What is filtered by default
+Plugin settings take precedence over the project file, which takes precedence over the defaults. Ignore patterns from all sources are combined.
 
-To prevent false alarms, noise from test fixtures, and unnecessary tokenization, the detector filters out non-production code, data files, and build artifacts by default:
+## What is indexed
 
-- **Test files and directories (`ignoreTests: true`):** Test files, test suites, test doubles (mocks, stubs, fakes), fixtures, snapshots, and test runners across common languages and frameworks (e.g. Jest, Vitest, Pytest, Go, JUnit, Cargo, etc.) are skipped automatically. Use `customTestPatterns` to ignore additional paths, `excludeTestPatterns` to keep specific paths in production scope, or `ignoreTests: false` to disable test filtering entirely.
-- **Non-code and data formats:** Documentation (`.md`, `.txt`), data and configuration files (`.json`, `.yaml`, `.toml`, `.csv`, `.ini`), server configs (`nginx`, `apacheconf`), diffs, logs, and standalone markup data (`.svg`, `.xml`) are excluded. To scan duplicates within specific data or doc formats, opt them in via `formatsExts`.
-- **Generated code and lockfiles:** Files containing standard auto-generation header markers (such as `@generated` or `DO NOT EDIT`), generated file naming conventions (`*.generated.*`, `*.designer.cs`), lockfiles (`*.lock`, `*-lock.json`), and minified assets (`*.min.js`, `*.map`) are ignored.
-- **Safety and resource limits:** Large files (>100 KiB) and files outside the Git repository are skipped to maintain minimal memory usage and fast background indexing.
-## Scope and performance
+The index holds files from `git ls-files --cached --others --exclude-standard` (tracked files plus untracked files that are not ignored), except for the following:
 
-- Only Git-tracked files are indexed (`git ls-files`); outside a Git repository, baseline scanning is skipped.
-- Hard caps on file size, file count, and total indexed bytes prevent runaway memory use in large monorepos.
-- Tokenized files are cached on disk per workspace with size-bounded eviction, so repeat sessions skip re-tokenization entirely.
+- **Build output, dependencies, and caches:** `node_modules`, `target`, `dist`, `build`, `out`, `vendor`, `coverage`, `.next`, `__pycache__`, `.venv`, and similar directories, at any depth, even if the repository doesn't gitignore them. Git is never asked to list their untracked contents.
+- **Non-code formats:** docs, data, and config files (`.md`, `.json`, `.yaml`, `.toml`, `.csv`, `.svg`, `.xml`, …). You can opt formats back in with `formatsExts`.
+- **Generated files and noise:** files with a generated-code marker (`@generated`, `DO NOT EDIT`, …) in their leading comments, lockfiles, minified bundles, and source maps.
+- **Tests** (unless `ignoreTests` is `false`): test files and directories, mocks, fixtures, and snapshots, across common languages. Use `customTestPatterns` to add paths and `excludeTestPatterns` to keep specific paths as production code.
+- **Large files:** anything over 100 KiB.
+
+Outside a Git repository the detector is unavailable.
+
+Changes made outside `write`/`edit` (for example by `bash`, subagents, or `git checkout`) are picked up by a cheap rescan after each such tool call and at the start of each turn. The rescan compares file size and mtime and re-tokenizes only the files that changed.
+
+## Performance
+
+- The index stores compact typed arrays (about 12 bytes per token) plus a winnowed fingerprint map. On a 3,900-file TypeScript monorepo (2.8M tokens), a cold index takes about 1.5 s in the background worker. The index itself holds about 40 MB, and extra process RSS peaks at about 200 MB while indexing. Version 0.3 used 1.1–1.5 GB per session.
+- Nothing is cached on disk. Version 0.3 caches in `~/.cache/omp/duplicate-detector` (SQLite files and shard directories) are deleted automatically.
 
 ## Development
 
 Requires [Bun](https://bun.sh) and Git.
 
 ```bash
-bun install        # dependencies
+bun install
 bun test           # test suite
 bun run typecheck  # TypeScript
-bun run check      # lint (Biome)
-bun run build:worker  # rebuild dist/detector-worker.js after worker-side changes
+bun run check      # Biome + knip
 ```
+
+The worker (`src/detector/worker.ts`) runs from source under Bun. Inside omp it is bundled in memory at startup, so there is no build step.
 
 ## License
 

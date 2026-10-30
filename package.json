@@ -1,11 +1,10 @@
 {
 	"name": "omp-plugin-duplicate-detector",
-	"version": "0.3.0",
+	"version": "0.4.0",
 	"description": "Code clone and duplication detector plugin for oh-my-pi powered by jscpd",
 	"type": "module",
 	"files": [
 		"src",
-		"dist",
 		"types",
 		"README.md"
 	],
@@ -18,55 +17,53 @@
 		"settings": {
 			"minLines": {
 				"type": "number",
-				"description": "Minimum consecutive lines required to report a duplicate block",
-				"default": 5
+				"description": "Minimum duplicated lines (in the edited file) required to report a duplicate",
+				"default": 5,
+				"min": 1,
+				"max": 1000
 			},
 			"minTokens": {
 				"type": "number",
-				"description": "Minimum token count threshold for code clone detection",
-				"default": 40
-			},
-			"checkOnMutation": {
-				"type": "boolean",
-				"description": "Automatically check newly written/edited code for duplicates",
-				"default": true
+				"description": "Minimum duplicated tokens required to report a duplicate",
+				"default": 40,
+				"min": 10,
+				"max": 1e4
 			},
 			"reminderMode": {
 				"type": "enum",
-				"enum": [
+				"values": [
 					"steer",
-					"in-band",
-					"none"
+					"in-band"
 				],
-				"description": "Feedback style: steer (live TTSR warning card & steer message), in-band (<system-reminder> on tool_result), or none",
+				"description": "How the model is warned: steer (warning card + message at the next step) or in-band (additional context on the write/edit tool result). Use /duplicates off to disable.",
 				"default": "steer"
 			},
 			"ignorePatterns": {
 				"type": "string",
-				"description": "Additional comma-separated glob patterns to ignore during duplicate detection",
+				"description": "Additional comma-separated gitignore-style patterns to skip (commas inside {braces} are kept)",
 				"default": ""
 			},
 			"ignoreTests": {
 				"type": "boolean",
-				"description": "Automatically ignore test files, test directories, mocks, and fixtures across all programming languages",
+				"description": "Skip test files, test directories, mocks, fixtures, and snapshots",
 				"default": true
 			},
 			"maxIndexedFiles": {
 				"type": "number",
-				"description": "Maximum number of source code files to index during baseline initialization",
-				"default": 1e4
+				"description": "Maximum number of files held in the duplicate index",
+				"default": 1e4,
+				"min": 1,
+				"max": 1e6
 			}
 		}
 	},
 	"scripts": {
-		"build:worker": "bun build ./src/detector-worker.ts --target=bun --outfile=./dist/detector-worker.js",
 		"test": "bun test ./test",
 		"typecheck": "tsc --noEmit -p tsconfig.json",
 		"format": "biome format --write .",
 		"lint": "biome lint .",
 		"knip": "knip",
-		"check": "biome check --write . && knip",
-		"prepare": "bun run build:worker"
+		"check": "biome check --write . && knip"
 	},
 	"keywords": [
 		"oh-my-pi",
@@ -83,14 +80,14 @@
 	"dependencies": {
 		"@jscpd/core": "^4.2.5",
 		"@jscpd/tokenizer": "^4.2.6",
-		"eventemitter3": "^5.0.4",
 		"ignore": "^7.0.6",
 		"json5": "^2.2.3",
 		"yaml": "^2.9.0"
 	},
 	"devDependencies": {
 		"@biomejs/biome": "latest",
-		"@oh-my-pi/pi-coding-agent": "latest",
+		"@oh-my-pi/pi-coding-agent": "^18.14.0",
+		"@oh-my-pi/pi-tui": "^18.14.0",
 		"bun-types": "latest",
 		"husky": "^9.1.7",
 		"knip": "^6.32.2",
